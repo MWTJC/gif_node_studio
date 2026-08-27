@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  应用自带的自定义阈值图（threshold maps），供 MagickOrderedDitherImage 使用。
+
+  说明：官方 ImageMagick 的 thresholds.xml 不包含 diag 系列（diag5x5 仅见于
+  ImageMagick Examples 文档作者的本地配置）。本文件只注册应用需要的自定义映射；
+  ImageMagick 的 GetThresholdMap 会依次遍历 MAGICK_CONFIGURE_PATH 中的全部
+  thresholds.xml，因此本文件不会遮蔽官方配置中的内建映射（o8x8/h4x4a 等）。
+
+  diag5x5：对角线条纹有序仿色（5×5，25 级阈值为 1..5，除数为 6）。
+  数值沿反对角线（x+y 恒定）呈 {4,2,1,3,5} 的 5 步循环，产生 45° 对角线纹理。
+-->
+<thresholds>
+  <threshold map="diag5x5" alias="diag5x5">
+    <description>Diagonal 5x5 line dither</description>
+    <levels width="5" height="5" divisor="6">
+      4 2 1 3 5
+      2 1 3 5 4
+      1 3 5 4 2
+      3 5 4 2 1
+      5 4 2 1 3
+    </levels>
+  </threshold>
+  <threshold map="hlines2x2" alias="hlines2x2">
+    <description>Horizontal Lines 2x2</description>
+    <levels width="2" height="2" divisor="3">
+      1 1
+      2 2
+    </levels>
+  </threshold>
+  <threshold map="hlines2x2a" alias="hlines2x2a">
+    <description>Horizontal Lines 2x2 (bounds adjusted)</description>
+    <levels width="2" height="2" divisor="10">
+      3 3
+      9 9
+    </levels>
+  </threshold>
+  <threshold map="hlines12x4" alias="hlines12x4">
+    <description>Horizontal Lines 12x4</description>
+    <levels width="12" height="4" divisor="9">
+      7 8 8 8 8 7 6 6 5 5 5 6
+      2 1 1 1 1 2 3 4 4 4 3 3
+      6 6 5 5 5 6 7 8 8 8 8 7
+      3 4 4 4 3 3 2 1 1 1 1 2
+    </levels>
+  </threshold>
+</thresholds>

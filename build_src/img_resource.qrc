@@ -1,0 +1,9 @@
+<RCC>
+  <qresource>
+    <file>./ico/app_icon.ico</file>
+    <file>./ico/logo.gif</file>
+    <file>./ico/gifsicle.gif</file>
+    <file>./ico/wand.png</file>
+    <file>./ico/pyav.png</file>
+  </qresource>
+</RCC>
