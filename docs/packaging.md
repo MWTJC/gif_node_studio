@@ -4,22 +4,27 @@
 
 Wand 通过 ctypes 绑定 MagickWand/MagickCore 动态库，因此**发行包必须包含 ImageMagick 运行时文件**（`magick.exe` CLI 不需要）。运行时目录唯一约定为 `app_root_dir()/runtime/imagemagick/`：打包后（Nuitka standalone / PyInstaller）`app_root_dir()` = exe 所在目录，即 exe 旁 `runtime/imagemagick/`；开发态 `app_root_dir()` 返回**包目录** `src/anime_gif_node_studio`（见 `core/paths.py`），项目根 `runtime/imagemagick/` 不会被探测（见下「运行时发现与回退」）。运行时由 `scripts/prepare_imagemagick_runtime.py` 生成（约 10 MB；源目录 = 脚本顶部 `SOURCE_DIR` 变量，可用环境变量 `IMAGEMAGICK_SOURCE_DIR` 覆盖），清单见下表：
 
-| 类别 | 文件（minimal 实测集 = 13 DLL + 2 coder，合计约 10 MB） | 说明 |
+| 类别 | 文件（minimal 实测集 = 13 DLL + 2 coder + thresholds.xml，合计约 10 MB） | 说明 |
 |---|---|---|
 | 核心库 | `CORE_RL_MagickCore_.dll`、`CORE_RL_MagickWand_.dll` | Wand 的 ctypes 绑定目标 |
 | MagickCore 导入表闭包 | `CORE_RL_bzip2_`、`CORE_RL_freetype_`、`CORE_RL_lcms_`、`CORE_RL_lqr_`、`CORE_RL_raqm_`、`CORE_RL_xml_`、`CORE_RL_zlib_`、`CORE_RL_glib_`、`CORE_RL_fribidi_`、`CORE_RL_harfbuzz_` | 缺任一则 MagickCore 无法加载（glib/fribidi/harfbuzz 为 lqr/raqm 传递依赖） |
 | PNG delegate | `CORE_RL_png_.dll`（依赖 zlib） | 由 PNG coder 运行时加载 |
 | coder 模块 | `modules/coders/IM_MOD_RL_png_.dll`、`IM_MOD_RL_gif_.dll` | GIF 零额外依赖（LZW 内置于 coder） |
+| 配置 XML | `thresholds.xml` | 官方 ordered-dither 阈值图（o8x8/o2x2/h4x4a 等）**不编译进 MagickCore**，运行时从该文件加载；缺失则「颜色量化」勾选有序仿色选内建图报 `InvalidArgument` |
 | 合规 | `License.txt`、`NOTICE.txt` | 脚本强制保留 |
 
-**不需要**：配置 XML（官方有序仿色阈值图 o8x8 等编译进 MagickCore；自定义图 diag5x5 等由
-app `data/` 提供，`MAGICK_CONFIGURE_PATH` 恒带 `data/`）、VC 运行库（目标机系统提供
-VC++ Redistributable，Nuitka 打包另在 exe 目录携带——随包只会造成 dist 内重复 DLL 如
-vcruntime140.dll）、`mfc140u.dll` / 滤镜模块 / `Magick++` / CLI / 安装器残留。
+**需要**：`thresholds.xml`（官方有序仿色阈值图 o8x8/o2x2/h4x4a 等**不编译进
+MagickCore**，MagickCore 运行时从该文件加载——漏带则有序仿色选内建图报
+`InvalidArgument`）。app `data/thresholds.xml` 只提供自定义图 diag5x5 等，两者经
+`MAGICK_CONFIGURE_PATH` 合并复用。**不需要**：其余配置 XML（colors.xml/type.xml/
+policy.xml 等）、VC 运行库（目标机系统提供 VC++ Redistributable，Nuitka 打包另在
+exe 目录携带——随包只会造成 dist 内重复 DLL 如 vcruntime140.dll）、`mfc140u.dll` /
+滤镜模块 / `Magick++` / CLI / 安装器残留。
 
 minimal 集经六阶段精简 + 真 app 端到端验证（GIF 导出
 MagickQuantizeImages（原样合成，决策 #77）、颜色深度含自定义 diag5x5 阈值图、
-web-safe remap、GIF 解码）。需要完整 coder 集合排障时，直接整目录复制 `SOURCE_DIR`
+有序仿色内建 o8x8 阈值图（2026-08：此前漏带 thresholds.xml 报 InvalidArgument，
+今已随包提供）、web-safe remap、GIF 解码）。需要完整 coder 集合排障时，直接整目录复制 `SOURCE_DIR`
 并剔除安装器残留即可（约 50 MB）。
 
 ## 运行时发现与回退（实测语义，勿信旧文档「MAGICK_HOME → runtime → PATH」顺序）
