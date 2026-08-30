@@ -1521,9 +1521,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.critical(self, "无法运行", str(exc))
             return
         if clear_preview:
-            # 手动点击运行时先清空预览框，避免旧结果在执行期间残留。
+            # 手动点击运行时先清空预览框，避免旧结果在执行期间残留；同时释放
+            # 本链**下游**节点的预览——下游预览（QMovie/自定义 GIF 播放器）
+            # 可能正在播放本链节点即将覆盖的固定缓存文件（如 preview.gif），
+            # Windows 下文件被占用会导致写入失败（WinError 5，实测 GIF
+            # 合成(FFmpeg) 重跑时被下游「图片1:1分辨率查看」的播放锁定）。
+            affected = []
             for current in order:
-                current.panel.release_preview()
+                affected.extend(_downstream(current))
+            release_previews(affected)
         self.active_request = (request_id, order, node)
         self.active_revisions = {current.id: current.revision for current in order}
         # 缓存大小上限在提交前（UI 线程）读取一次，工作线程不再触碰 QSettings。
@@ -1587,13 +1593,19 @@ class MainWindow(QtWidgets.QMainWindow):
         cache_name = getattr(node_class, "CACHE_FILENAME", None)
         keep = {backend.workspace / cache_name} if cache_name else set()
         backend.clear_previous_run(snapshot, keep)
+        # 重新统计本节点工作区（工作线程）→ GUI 线程后续 cache_size 读到 O(1) 的
+        # 账本值，不再为显示缓存大小而全量 stat（6000 帧时一次约 0.5s 卡顿）。
+        backend.refresh_node_cache_size()
         # 缓存总量超限时自动淘汰最旧中间缓存（保留各节点最新结果与导出固定缓存）；
         # 限额在提交时已由 UI 线程读入，工作线程只读这个值。
         limit_bytes = getattr(self, "_active_cache_limit_bytes", None)
+        removed = 0
         if limit_bytes is not None:
             freed, removed = backend.enforce_cache_limit(limit_bytes)
             if removed:
                 self._cache_eviction_note = f"缓存超限，已自动清理 {removed} 项（{format_bytes(freed)}）"
+                # 淘汰了其他节点的旧 job：全量重建账本，保证总账与实际磁盘一致。
+                backend.refresh_cache_ledger()
         return result
 
 
@@ -2261,7 +2273,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def delete_nodes(self, nodes):
         if self.worker.busy: self.statusBar().showMessage("节点运行中，暂不能删除"); return
-        release_previews(nodes)
+        # 释放被删节点**及其下游节点**的预览：下游预览（QMovie/自定义 GIF
+        # 播放器）可能正在播放被删节点的产物文件（如 GIF 合成节点的
+        # preview.gif），Windows 下文件被占用会导致缓存目录删除失败
+        # （WinError 32，实测「图片1:1分辨率查看」播放上游 GIF 时删除上游失败）。
+        affected = list(nodes)
+        for node in nodes:
+            affected.extend(_downstream(node))
+        release_previews(affected)
         for node in nodes:
             self.backend.for_node(node.id).clear_cache()
             self.panels.pop(node.id, None)

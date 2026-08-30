@@ -13,8 +13,9 @@
       派生 `labels` / `keys` / `values` / 默认值；`RESAMPLE`、`SCALE_STRATEGY`、
       `COLOR_REDUCE_ALGORITHM`、`DITHER` 四个选项组定义于此（详见[关键决策 #51](decisions/51-60.md#d51)）。
     - `paths.py` / `logging_setup.py` — 路径解析（`app_root_dir` 只读程序文件 / `user_data_dir` 可写用户数据 / `node_presets_dir` 项目预设目录，见[关键决策 #84](decisions/81-90.md#d84) 与 [#89](decisions/81-90.md#d89)）与 loguru 文件日志初始化（`logs/app.log`，1 MB 覆盖、只保留最新一份，目录不可写时降级仅终端）。
-  - `media/` — 媒体后端（2026-08 收敛为单类，见[关键决策 #99](decisions/91-100.md#d99)）：
-    - `backend.py` — `MediaBackend` 单类（实例状态 + 全部行为；格式化/颜色/序列/导出/量化/分析/缓存七职责以区段注释分组，无状态辅助为模块级纯函数）。
+  - `media/` — 媒体后端（2026-08 拆分为七个纯函数模块，见[关键决策 #120](decisions/120-129.md#d120)）：
+    - `backend.py` — `MediaBackend` 实例状态核心（`__init__`/`for_node`/`_progress`/`_job_dir`）+ 七区段方法的薄转发（外部调用方 API 零改动）。
+    - `backend_format.py` / `backend_color.py` / `backend_sequence.py` / `backend_export.py` / `backend_quantize.py` / `backend_analysis.py` / `backend_cache.py` — 七职责区段纯函数模块（无实例状态，工作区/进度等依赖由调用方显式注入；`backend_cache.py` 另承载 `_CacheSizeLedger` 增量账本）。
     - `palettes.py` — 调色板/阈值图/系统色板辅助（`ORDERED_DITHER_MAPS` / `POSTERIZE_LEVELS` / `system_palette_blob` 等）。
     - `image_utils.py` — wand/PIL 像素与字节转换、缓存 PNG 压缩常量（`PNG_EXPORT_WORKERS` / `_wand_rgba_bytes` 等）。
     - `imagemagick.py` — ImageMagick 运行时探测与环境变量注入（仅 Wand：定位 DLL 目录并验证可用性，不派生 CLI）。

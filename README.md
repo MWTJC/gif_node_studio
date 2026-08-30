@@ -14,6 +14,20 @@
 - Gifsicle
 - Pillow
 
+## 例子
+### 风格化
+
+<img alt="风格化1.gif" height="200" src="docs/imgs/%E9%A3%8E%E6%A0%BC%E5%8C%961.gif"/>
+
+<img alt="风格化2.gif" height="200" src="docs/imgs/%E9%A3%8E%E6%A0%BC%E5%8C%962.gif"/>
+
+### 录屏优化
+<center>
+    <img src="docs/imgs/%E5%BD%95%E5%B1%8F1.gif" alt="录屏1.gif">
+    <br>
+    <div>849*522 1.95MB</div>
+</center>
+
 ## 特性
 
 - **节点式工作流**：输入 → 截取 → 格式化 → 处理（含画面裁剪等）→ 输出，按端口颜色连线（橙色 = 格式化清单，蓝色 = 序列图片）

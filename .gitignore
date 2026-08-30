@@ -2,6 +2,7 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+*.gif
 *.mp4
 tmpcache/
 logs/

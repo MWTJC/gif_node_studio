@@ -18,7 +18,7 @@ from ..core.options import (
     GIFSICLE_DITHER,
     GIFSICLE_OPTIMIZE,
 )
-from ..media.backend import _remove_path
+from ..media.backend_cache import _remove_path
 from ..media.media_info import format_bytes
 from .definitions import (
     BoolParam,
