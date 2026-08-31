@@ -17,12 +17,14 @@ from ..core.options import (
     GIFSICLE_COLOR_METHOD,
     GIFSICLE_DITHER,
     GIFSICLE_OPTIMIZE,
+    GIFSKI_FAST_MODE,
 )
 from ..media.backend_cache import _remove_path
 from ..media.media_info import format_bytes
 from .definitions import (
     BoolParam,
     ChoiceParam,
+    ColorParam,
     FloatParam,
     IntParam,
     NodeCategory,
@@ -297,6 +299,115 @@ class GifExportFfmpegNode(SequenceNode):
             {"序列图片": artifact, "格式化清单": manifest},
             metadata={"文件大小": format_bytes(path.stat().st_size)},
         )
+
+
+
+class GifExportGifskiNode(SequenceNode):
+    """GIF 合成(gifski)：gifski CLI 编码（每帧独立调色板，见[决策 #124]）。
+
+    处理：backend.export_gif_gifski → MultiOutput(序列图片/格式化清单)
+    参数（按 gifski 设计特性）：fps/quality/motion_quality/lossy_quality
+          （数值）、width/height（输出尺寸限制）、fast_mode（ChoiceParam）、
+          repeat/bounce/fixed_color(+启用)/matte(+启用)（Bool/Color/Int）、
+          transparent_preview（BoolParam 勾选框，纯显示）
+    组件：导出按钮 + 1:1 预览 + 透明背景显示
+          （PanelSpec.export_enabled, preview_1to1, preview_bg_param）
+
+    与「GIF 合成」(wand 共享调色板) /「GIF 合成(FFmpeg)」(palettegen 共享
+    调色板) 为**平行路线**（决策 #124）：gifski 每帧独立调色板（数千色/帧）
+    + 时域仿色抗闪烁 + 有损 LZW——单帧质量最大，适合照片/渐变等复杂色板
+    素材；共享调色板稳定可控（防帧间闪烁），适合录屏/UI。gifski 输出仍可
+    接「GIF 优化」节点(gifsicle)再优化（业界标准串联）。
+    """
+
+    NODE_NAME = "GIF 合成（gifski）"
+
+    # 导出终端节点的框架契约（与 GIF 合成/GIF 优化节点一致）：
+    # ui.py 按 EXPORT_KIND="gif" 分派导出，固定缓存 preview.gif。
+    EXPORT_KIND = "gif"
+    CACHE_FILENAME = "preview.gif"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "gif_export_gifski", self.NODE_NAME, NodeCategory.OUTPUT,
+                icon=category_icon(NodeCategory.OUTPUT, "mdi6.file-gif-box"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(
+                    PortDefinition("序列图片", PortType.SEQUENCE),
+                    PortDefinition("格式化清单", PortType.MANIFEST),
+                ),
+                params=(
+                    FloatParam("fps", "帧速", default=12.0, minimum=0.1, maximum=100),
+                    IntParam("quality", "总体质量", default=100, minimum=1, maximum=100),
+                    IntParam("motion_quality", "运动质量", default=100, minimum=1, maximum=100),
+                    IntParam("lossy_quality", "有损质量", default=100, minimum=1, maximum=100),
+                    IntParam("out_width", "宽度限制(px, 0=不限制)", default=800, minimum=0, maximum=10000, widget="spin"),
+                    IntParam("out_height", "高度限制(px, 0=不限制)", default=600, minimum=0, maximum=10000, widget="spin"),
+                    ChoiceParam("fast_mode", "速度档", options=GIFSKI_FAST_MODE),
+                    IntParam("repeat", "循环次数(-1/0/N)", default=0, minimum=-1, maximum=10000, widget="spin"),
+                    BoolParam("bounce", "往复", default=False),
+                    BoolParam("fixed_color_enabled", "启用固定色", default=False),
+                    ColorParam("fixed_color", "固定色(恒保留)", default="#000000"),
+                    BoolParam("matte_enabled", "启用合成底色", default=False),
+                    ColorParam("matte_color", "合成底色(半透明背景)", default="#ffffff"),
+                    # 纯显示选项（与「GIF 合成」节点一致）：勾选后预览框改用
+                    # 绿幕/品红色，便于观察透明通道，不触发运行。
+                    BoolParam("transparent_preview", "透明预览", default=False),
+                ),
+                panel=PanelSpec(export_enabled=True, preview_1to1=True, preview_bg_param="transparent_preview"),
+            ),
+            help=(
+                "输入图片序列\n"
+                "gifski编码\n"
+                "运动质量：越小越拖影\n"
+                "有损质量：越小越损\n"
+                "尺寸限制：像素，0=不限制\n"
+                "速度档：标准/快速(时间-50%)/精细(时间+50%)；\n"
+                "循环：-1=不循环 0=无限 N=重复N次；\n"
+                "往复：动画正放后接倒放\n"
+                "固定色：调色板恒保留该色（勾选启用后生效）\n"
+                "合成底色：半透明像素的合成背景（勾选启用后生效）；\n"
+                "透明输入按 GIF 1-bit 透明语义保留；\n"
+                "可导出到本地文件；\n"
+                "另输出格式化清单（生成的 gif），供 gif优化分析 节点查看存储情况"
+            ),
+        )
+
+    @classmethod
+    def describe_output(cls, output):
+        """输出类节点元数据契约：仅关键信息（节点自身定义展示）。
+
+        execute 已把可读摘要（文件大小等）附到 MultiOutput.metadata，直接
+        透出，不再逐端口展开/深度探测（与其它 GIF 导出节点一致）。
+        """
+        if isinstance(output, MultiOutput):
+            return dict(output.metadata or {})
+        return super().describe_output(output)
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        artifact = cls.sequence(inputs)
+        path = backend.export_gif_gifski(
+            artifact, backend.workspace / cls.CACHE_FILENAME,
+            fps=float(params["fps"]),
+            quality=int(params["quality"]),
+            motion_quality=int(params["motion_quality"]),
+            lossy_quality=int(params["lossy_quality"]),
+            width=int(params["out_width"]),
+            height=int(params["out_height"]),
+            fast_mode=GIFSKI_FAST_MODE.key_of(params["fast_mode"]),
+            repeat=int(params["repeat"]),
+            bounce=bool(params["bounce"]),
+            fixed_color=params["fixed_color"] if params["fixed_color_enabled"] else None,
+            matte=params["matte_color"] if params["matte_enabled"] else None,
+        )
+        manifest = MediaManifest(MediaKind.ANIMATED_IMAGE, (str(path),))
+        return MultiOutput(
+            {"序列图片": artifact, "格式化清单": manifest},
+            metadata={"文件大小": format_bytes(path.stat().st_size)},
+        )
+
 
 
 

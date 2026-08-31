@@ -22,9 +22,12 @@ from .parameter_panel import ParameterPanel
 class PaletteViewNode(StudioNode):
     """gif调色板查看：分析类节点，可接清单或序列，无输出。
 
-    处理：backend.analysis_palette + backend.palette_swatch → AnalysisResult
+    处理：
+    - GIF 清单（ANIMATED_IMAGE）：逐帧**生效色表**（局部色表优先/全局色表
+      兜底）→ 每帧固定 16×16 色块图，帧滑条逐帧查看（决策 #126）；
+    - 序列/静态清单：整序列像素统计（>256 色报错）→ 单张色块图；
     参数：无
-    组件：1:1 预览（PanelSpec.preview_1to1）
+    组件：帧滑条 + 1:1 预览（PanelSpec.scrub_frames, preview_1to1）
     """
 
     NODE_NAME = "gif调色板查看"
@@ -38,11 +41,13 @@ class PaletteViewNode(StudioNode):
                     PortDefinition("格式化清单", PortType.MANIFEST),
                     PortDefinition("序列图片", PortType.SEQUENCE),
                 ),
-                panel=PanelSpec(preview_1to1=True),
+                panel=PanelSpec(scrub_frames=True, preview_1to1=True),
             ),
             help=(
                 "输入图片序列/格式化清单\n"
-                "查看图片序列及 GIF 的调色板，可能不准确，不支持视频；"
+                "GIF：逐帧查看每帧色表（帧滑条；每帧局部色表优先，否则全局色表），"
+                "色块图=固定 16×16（每帧 ≤256 色天然适配）；\n"
+                "序列：整序列像素统计（>256 色报错不支持）；\n"
                 "色板图为固定 16×16 色块（缺色格透明），预览框按原始像素 1:1 显示；"
             ),
         )
@@ -51,6 +56,10 @@ class PaletteViewNode(StudioNode):
     def execute(cls, inputs, params, backend):
         manifest = next((value for value in inputs if isinstance(value, MediaManifest)), None)
         sequence = next((value for value in inputs if isinstance(value, SequenceArtifact)), None)
+        if manifest is not None and manifest.kind is MediaKind.ANIMATED_IMAGE:
+            # GIF：逐帧生效色表 + 帧滑条（gifski 式每帧独立局部色表逐帧可查）。
+            first, frames, metadata = backend.analysis_palette_frames(manifest)
+            return AnalysisResult(first, metadata, frames)
         colors, has_transparency = backend.analysis_palette(manifest, sequence)
         swatch = backend.palette_swatch(colors, has_transparency)
         return AnalysisResult(

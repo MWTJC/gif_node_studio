@@ -83,11 +83,16 @@ def _gif_parse(path: str | Path) -> dict[str, Any] | None:
     pos = 6 + 7
     packed = data[10]  # 逻辑屏幕描述符第 4 字节（偏移 10），bit7=全局颜色表标志
     global_colors: int | None = None
+    global_table: list[tuple[int, int, int]] | None = None
     if packed & 0x80:  # 全局颜色表
         global_colors = 1 << ((packed & 0x07) + 1)
+        # 顺带记录条目内容（≤768B）：probe_gif 据此判断「非退化全局表」
+        # （≥2 种不同条目）以给出准确的色表口径（全局表 vs 每帧并集）。
+        global_table = _read_table(data, pos, global_colors)
         pos += 3 * global_colors
     size = len(data)
     frame_count = 0
+    local_table_frames = 0
     durations: list[int] = []
     pending_delay: int | None = None  # 最近一个 GCE 的延迟（毫秒），作用于下一个图像
     loop: int | None = None
@@ -114,6 +119,7 @@ def _gif_parse(path: str | Path) -> dict[str, Any] | None:
             image_packed = data[pos + 9]
             pos += 10
             if image_packed & 0x80:  # 局部颜色表
+                local_table_frames += 1
                 local_colors = 1 << ((image_packed & 0x07) + 1)
                 local_colors_max = max(local_colors_max, local_colors)
                 pos += 3 * local_colors
@@ -179,6 +185,9 @@ def _gif_parse(path: str | Path) -> dict[str, Any] | None:
         "durations_ms": durations,
         "loop": loop,
         "palette_size": global_colors if global_colors is not None else (local_colors_max or None),
+        "global_table": global_table,
+        "local_table_frames": local_table_frames,
+        "local_colors_max": local_colors_max,
         "regions": regions,
     }
 
@@ -196,8 +205,11 @@ def gif_palette_entries(path: str | Path) -> tuple[list[tuple[int, int, int]], i
 
     返回 ``(条目列表, 透明索引或 None)``。规则：全局颜色表存在且**非退化**
     （至少 2 种不同条目，PIL 等编码器写的全黑占位表视为退化）时用全局表；
-    否则取各帧局部颜色表的并集（保持出现顺序）。并集超过 256 时抛
-    ``ValueError``（不支持）。透明索引来自图形控制扩展（GCE）的透明标志。
+    否则取各帧局部颜色表的并集（保持出现顺序）。**并集不设上限**——GIF 只
+    约束单帧 ≤256 色，帧间并集可远超 256（gifski 式每帧独立色表正是如此），
+    返回完整并集不抛错；展示口径（全局表 / 并集）由调用方按
+    ``_gif_parse`` 的 ``global_table`` 判断。透明索引来自图形控制扩展
+    （GCE）的透明标志。
     """
     data = Path(path).read_bytes()
     if len(data) < 13 or data[:6] not in (b"GIF87a", b"GIF89a"):
@@ -212,6 +224,7 @@ def gif_palette_entries(path: str | Path) -> tuple[list[tuple[int, int, int]], i
         pos += 3 * count
     size = len(data)
     local_union: list[tuple[int, int, int]] = []
+    seen: set[tuple[int, int, int]] = set()
     while pos < size:
         block = data[pos]
         if block == 0x3B:  # trailer
@@ -225,7 +238,11 @@ def gif_palette_entries(path: str | Path) -> tuple[list[tuple[int, int, int]], i
                 count = 1 << ((image_packed & 0x07) + 1)
                 table = _read_table(data, pos, count)
                 for entry in table:
-                    if entry not in local_union:
+                    # 集合去重保序（O(1) 判重）：旧实现 `entry not in local_union`
+                    # 是 O(n²) 列表线性扫描——162 帧 × 256 色本地表 ≈ 4 万条，
+                    # 实测 probe_gif 单次 5.1s（describe_output 与预览播放都会调）。
+                    if entry not in seen:
+                        seen.add(entry)
                         local_union.append(entry)
                 pos += 3 * count
             if pos >= size:
@@ -262,9 +279,113 @@ def gif_palette_entries(path: str | Path) -> tuple[list[tuple[int, int, int]], i
         break  # 未知块：放弃
     if global_table and len(set(global_table)) >= 2:
         return global_table, transparent
-    if len(local_union) > 256:
-        raise ValueError("调色板颜色数大于 256，不支持")
+    # 并集不设上限（docstring）：返回完整条目，调用方自行决定展示/截断。
     return local_union, transparent
+
+
+def gif_palette_type(path: str | Path) -> str:
+    """GIF 调色板类型（色表形态）：全局色表(GCT) / 每帧局部色表(LCT) 组合（决策 #126）。
+
+    - 非退化全局色表（≥2 种不同条目，全黑占位表视为退化）视为「有全局色表」；
+    - 带局部色表的帧数 > 0 视为「有每帧局部色表」。
+
+    供 gif输入 / gif优化分析 节点元数据展示（probe_gif / analysis_gif_frames）。
+    """
+    parsed = _gif_parse(path)
+    if parsed is None:
+        return "未知"
+    has_gct = bool(parsed.get("global_table") and len(set(parsed["global_table"])) >= 2)
+    has_lct = bool(parsed.get("local_table_frames"))
+    if has_gct and has_lct:
+        return "全局色表 + 每帧局部色表"
+    if has_gct:
+        return "仅全局色表"
+    if has_lct:
+        return "仅每帧局部色表"
+    return "无调色板"
+
+
+def gif_frame_palettes(path: str | Path) -> tuple[list[list[tuple[int, int, int]]], list[bool]]:
+    """逐帧解析 GIF 各帧的**生效色表**与透明标志（决策 #126）。
+
+    生效规则：帧带局部色表（LCT）→ 用该帧 LCT；否则 → 非退化全局色表
+    （全黑占位表视为退化）；两者皆无 → 空表。透明标志 = 该帧图形控制
+    扩展（GCE）是否声明透明。
+
+    只做结构扫描不解码像素（与 ``_gif_parse`` 同层）；供调色板查看节点的
+    逐帧 slider（gifski 式每帧独立色表的文件，逐帧色表差异大）。
+
+    返回 ``(每帧色表列表, 每帧透明标志列表)``；解析失败抛 ``ValueError``。
+    """
+    data = Path(path).read_bytes()
+    if len(data) < 13 or data[:6] not in (b"GIF87a", b"GIF89a"):
+        raise ValueError("不是有效的 GIF 文件")
+    pos = 6 + 7
+    packed = data[10]  # 逻辑屏幕描述符，bit7=全局颜色表标志
+    global_table: list[tuple[int, int, int]] = []
+    if packed & 0x80:
+        count = 1 << ((packed & 0x07) + 1)
+        global_table = _read_table(data, pos, count)
+        pos += 3 * count
+    global_table = global_table if len(set(global_table)) >= 2 else []
+    size = len(data)
+    palettes: list[list[tuple[int, int, int]]] = []
+    transparent_flags: list[bool] = []
+    pending_transparent = False  # 最近一个 GCE 的透明标志，作用于下一个图像
+    while pos < size:
+        block = data[pos]
+        if block == 0x3B:  # trailer
+            break
+        if block == 0x2C:  # 图像描述符 → 一帧
+            if pos + 10 > size:
+                break
+            image_packed = data[pos + 9]
+            pos += 10
+            frame_table: list[tuple[int, int, int]] = []
+            if image_packed & 0x80:  # 局部颜色表
+                count = 1 << ((image_packed & 0x07) + 1)
+                frame_table = _read_table(data, pos, count)
+                pos += 3 * count
+            else:
+                frame_table = list(global_table)
+            palettes.append(frame_table)
+            transparent_flags.append(pending_transparent)
+            pending_transparent = False
+            if pos >= size:
+                break
+            pos += 1  # LZW 最小码长
+            while pos < size:
+                sub_size = data[pos]
+                pos += 1
+                if sub_size == 0:
+                    break
+                pos += sub_size
+            continue
+        if block == 0x21:  # 扩展块
+            pos += 1
+            if pos >= size:
+                break
+            label = data[pos]
+            pos += 1
+            if label == 0xF9:  # 图形控制扩展：size=4, packed, delay_lo, delay_hi, transparent, 0x00
+                if pos + 6 > size:
+                    break
+                sub_size = data[pos]
+                if sub_size == 4 and (data[pos + 1] & 0x01):  # 透明标志
+                    pending_transparent = True
+                pos += sub_size + 2
+                continue
+            while pos < size:
+                sub_size = data[pos]
+                pos += 1
+                if sub_size == 0:
+                    break
+                pos += sub_size
+            continue
+        break  # 未知块：放弃
+    if not palettes:
+        raise ValueError("未能解析 GIF 帧色表")
+    return palettes, transparent_flags
 
 
 def _format_frame_times(durations: list[int]) -> str:
@@ -284,7 +405,11 @@ def probe_gif(path: str | Path) -> dict[str, Any]:
         durations = parsed["durations_ms"]
         frame_count = parsed["frame_count"]
         constant = len(set(durations)) <= 1
-        # 颜色板条目数与调色板查看节点同源（退化全局表回退局部表并集），保证一致。
+        # 颜色板口径（决策 #123）：非退化全局表 → 全局表色数；否则 → 每帧
+        # 局部表并集（gifski 式每帧独立色表，并集常超 256——GIF 只约束单帧
+        # ≤256 色）。与调色板查看节点同源（gif_palette_entries），保证一致。
+        gct = parsed.get("global_table") or []
+        scope = "全局表" if len(set(gct)) >= 2 else "每帧色表并集"
         try:
             entries, _transparent = gif_palette_entries(path)
             palette_size = len(entries)
@@ -298,7 +423,8 @@ def probe_gif(path: str | Path) -> dict[str, Any]:
             "总时长": f"{sum(durations)} ms",
             "帧时间是否恒定": "是" if constant else "否",
             "帧时间": _format_frame_times(durations),
-            "颜色板颜色数": f"{palette_size} 色" if palette_size else "无颜色板",
+            "调色板类型": gif_palette_type(path),
+            "颜色板颜色数": f"{palette_size} 色（{scope}）" if palette_size else "无颜色板",
             "循环次数": parsed["loop"] if parsed["loop"] is not None else "未指定",
         }
     with Image.open(path) as image:

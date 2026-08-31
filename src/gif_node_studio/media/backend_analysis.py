@@ -12,7 +12,9 @@ from .image_utils import _wand_rgba_bytes
 from .imagemagick import require_wand
 from .media_info import _format_frame_times
 from .media_info import frame_optimization_ratio
+from .media_info import gif_frame_palettes
 from .media_info import gif_palette_entries
+from .media_info import gif_palette_type
 from .media_info import gif_playback_info
 from PIL import Image
 from collections.abc import Callable
@@ -171,6 +173,7 @@ def analysis_gif_frames(workspace, imagemagick, progress, manifest: MediaManifes
         "画布尺寸": f"{canvas_w} × {canvas_h}",
         "帧数": frame_count,
         "循环次数": loop if loop is not None else "未指定",
+        "调色板类型": gif_palette_type(source),
         "解码方式": "存储帧（按文件实际存储）"
         if mode == "stored"
         else "合成帧（coalesce）",
@@ -289,7 +292,9 @@ def analysis_palette(progress, manifest: MediaManifest | None=None, sequence: Se
             _progress(progress, (index + 1) / total, "统计调色板")
     elif manifest is not None and manifest.kind is MediaKind.ANIMATED_IMAGE:
         # GIF：读颜色表条目（与 probe_gif 的「颜色板颜色数」同源的结构解析，
-        # 条目数天然一致；GIF 色表 ≤256，无需超限检查）。
+        # 条目数天然一致；决策 #123 起并集不设上限——GIF 每帧 ≤256 色但帧间
+        # 并集可超 256，gifski 式每帧独立色表正是如此；色块图按固定 16×16
+        # 只显示前 256 格，元数据「颜色数」如实显示并集总数）。
         colors, transparent_index = gif_palette_entries(manifest.sources[0])
         return list(colors), transparent_index is not None
     elif manifest is not None and manifest.kind is MediaKind.VIDEO:
@@ -304,20 +309,61 @@ def analysis_palette(progress, manifest: MediaManifest | None=None, sequence: Se
         raise ValueError("节点无输入")
     return sorted(colors), has_transparency
 
-def palette_swatch(workspace, colors: list[tuple[int, int, int]], has_transparency: bool):
+def analysis_palette_frames(workspace, manifest: MediaManifest | None=None):
+    """GIF 逐帧色表查看：逐帧解析**生效色表**（LCT 优先，否则非退化 GCT），
+    每帧生成固定 16×16 色块图（决策 #126）。
+
+    与 ``analysis_palette``（并集/全局表单图）互补：gifski 式每帧独立局部
+    色表的文件逐帧色表差异大，并集图只能看整体；本函数逐帧出图，由
+    调色板查看节点的帧滑条逐帧查看（AnalysisResult.frames）。
+
+    返回 ``(首帧色块图, 全部帧色块图, 元数据)``；元数据含帧数/每帧颜色数
+    （范围）/并集颜色数/含透明帧数/调色板类型。
+    """
+    if manifest is None or not manifest.sources:
+        raise ValueError("gif调色板查看：节点无输入")
+    source = manifest.sources[0]
+    if manifest.kind is not MediaKind.ANIMATED_IMAGE or Path(source).suffix.lower() != ".gif":
+        raise ValueError("gif调色板查看：逐帧色表仅支持 GIF 输入")
+    palettes, transparent_flags = gif_frame_palettes(source)
+    output = _job_dir(workspace, "palette_frames")
+    frames: list[str] = []
+    union: set[tuple[int, int, int]] = set()
+    for index, (palette, has_transparency) in enumerate(zip(palettes, transparent_flags)):
+        union.update(palette)
+        target = output / f"frame_{index:06d}.png"
+        frames.append(palette_swatch(workspace, palette, has_transparency, target=target))
+    counts = [len(palette) for palette in palettes]
+    metadata = {
+        "帧数": len(palettes),
+        "每帧颜色数": (
+            f"{min(counts)}" if min(counts) == max(counts) else f"{min(counts)}–{max(counts)}"
+        ),
+        "并集颜色数": len(union),
+        "含透明帧数": sum(transparent_flags),
+        "调色板类型": gif_palette_type(source),
+    }
+    return frames[0], tuple(frames), metadata
+
+def palette_swatch(workspace, colors: list[tuple[int, int, int]], has_transparency: bool, target: str | Path | None=None):
     """把调色板绘制为固定 16×16 色块图（RGBA，缺色格透明）。
 
     固定 16 列 × 16 行对齐（256 格），颜色按行优先铺入；颜色不足
     256 时其余色块为**透明**（alpha=0，预览框 1:1 显示时透出底纹）。
     含透明时在颜色之后附一个棋盘格色块（仅在有空位时；256 色全满时
     省略，透明信息由元数据「含透明」承担）。
+
+    ``target`` 显式时写入该路径（逐帧色表查看共用 job dir，决策 #126），
+    否则自动新建 palette_xxx job dir。
     """
     from PIL import ImageDraw
 
     cell, gap = 12, 1
     columns = rows = 16
     capacity = columns * rows
-    entries: list[tuple[int, int, int] | None] = list(colors)
+    # 显式截断前 256 格：并集超限（gifski 式每帧色表）时只显示前 capacity
+    # 个条目，不依赖 ImageDraw 对越界矩形的裁剪行为（决策 #123）。
+    entries: list[tuple[int, int, int] | None] = list(colors)[:capacity]
     if has_transparency and len(entries) < capacity:
         entries.append(None)  # None = 透明（棋盘格）
     width = columns * cell + (columns - 1) * gap
@@ -337,8 +383,12 @@ def palette_swatch(workspace, colors: list[tuple[int, int, int]], has_transparen
                     )
         else:
             draw.rectangle([x, y, x + cell - 1, y + cell - 1], fill=(*color, 255))
-    output = _job_dir(workspace, "palette")
-    target = output / "palette.png"
+    if target is None:
+        output = _job_dir(workspace, "palette")
+        target = output / "palette.png"
+    else:
+        target = Path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
     image.save(target, "PNG")
     return str(target)
 

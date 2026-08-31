@@ -312,6 +312,15 @@ class GifFileParam(FileParam):
 @dataclass(frozen=True)
 
 
+class IcoFileParam(FileParam):
+    """打开 ICO 图标文件（Windows 图标容器，内含多个分辨率图像）。"""
+
+    filter: ClassVar[str] = "ICO (*.ico)"
+
+
+@dataclass(frozen=True)
+
+
 class DirectoryParam(FileParam):
     """选择目录。"""
 

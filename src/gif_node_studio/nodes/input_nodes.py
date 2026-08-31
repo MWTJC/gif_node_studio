@@ -13,6 +13,7 @@ from .definitions import (
     ColorParam,
     FloatParam,
     GifFileParam,
+    IcoFileParam,
     ImageFileParam,
     IntParam,
     NodeCategory,
@@ -129,6 +130,44 @@ class GifInputNode(StudioNode):
         # 默认截取第一帧作为后续节点（格式化解码前）的预览图。
         return replace(manifest, preview=backend.extract_first_frame(manifest))
 
+
+
+
+class IcoInputNode(StudioNode):
+    """ico输入。
+
+    处理：backend.decode_ico 解码容器内全部分辨率为 PNG（从大到小）→
+          MediaManifest(STATIC_SEQUENCE) 构造 + extract_first_frame（预览=最大分辨率）
+    参数：path（IcoFileParam 文件选择行，默认空）
+    组件：无增量（默认预览框）
+    """
+
+    NODE_NAME = "ico输入"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "ico_input", self.NODE_NAME, NodeCategory.INPUT,
+                icon=category_icon(NodeCategory.INPUT, "mdi6.microsoft-windows"),
+                outputs=(PortDefinition("格式化清单", PortType.MANIFEST),),
+                params=(IcoFileParam("path", "ICO 文件", default=""),),
+            ),
+            help=(
+                "选择单个 ICO 图标文件，\n"
+                "解码为从大到小的 PNG 列表（清单源文件），\n"
+                "输出格式化清单。"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs: list[Any], params: dict[str, Any], backend: MediaBackend) -> MediaManifest:
+        path = params.get("path", "")
+        if not path:
+            raise ValueError("请选择输入文件")
+        sources = backend.decode_ico(str(Path(path)))
+        manifest = MediaManifest(MediaKind.STATIC_SEQUENCE, sources)
+        # 静态序列预览直接引用源文件（首张 = 最大分辨率，无需额外物化）。
+        return replace(manifest, preview=backend.extract_first_frame(manifest))
 
 
 

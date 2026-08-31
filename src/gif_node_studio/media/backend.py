@@ -78,6 +78,9 @@ class MediaBackend:
     def extract_start_frame(self, manifest: MediaManifest):
         return backend_format.extract_start_frame(self.workspace, manifest)
 
+    def decode_ico(self, path: str | Path):
+        return backend_format.decode_ico(self.workspace, path)
+
     def _extract_video_frame(self, container_or_path, seconds: float):
         return backend_format._extract_video_frame(self.workspace, container_or_path, seconds)
 
@@ -198,6 +201,9 @@ class MediaBackend:
     def export_gif_ffmpeg(self, artifact: SequenceArtifact, path: str | Path, *, fps: float | None=None, width_percent: int=100, max_colors: int=256, stats_mode: str='full', dither: str='floyd_steinberg', bayer_scale: int=5, diff_mode: bool=True):
         return backend_export.export_gif_ffmpeg(self._progress, artifact, path, fps=fps, width_percent=width_percent, max_colors=max_colors, stats_mode=stats_mode, dither=dither, bayer_scale=bayer_scale, diff_mode=diff_mode)
 
+    def export_gif_gifski(self, artifact: SequenceArtifact, path: str | Path, *, fps: float=12.0, quality: int=90, motion_quality: int=90, lossy_quality: int=90, width: int=0, height: int=0, fast_mode: str='normal', repeat: int=0, bounce: bool=False, fixed_color: str | None=None, matte: str | None=None):
+        return backend_export.export_gif_gifski(self._progress, artifact, path, fps=fps, quality=quality, motion_quality=motion_quality, lossy_quality=lossy_quality, width=width, height=height, fast_mode=fast_mode, repeat=repeat, bounce=bounce, fixed_color=fixed_color, matte=matte)
+
     def export_webp(self, artifact: SequenceArtifact, path: str | Path, *, fps: float | None=None, quality: int=80, lossless: bool=False, width_percent: int=100):
         return backend_export.export_webp(self._progress, artifact, path, fps=fps, quality=quality, lossless=lossless, width_percent=width_percent)
 
@@ -232,6 +238,9 @@ class MediaBackend:
 
     def analysis_gif_frames(self, manifest: MediaManifest | None=None, mode: str='stored'):
         return backend_analysis.analysis_gif_frames(self.workspace, self.imagemagick, self._progress, manifest, mode)
+
+    def analysis_palette_frames(self, manifest: MediaManifest | None=None):
+        return backend_analysis.analysis_palette_frames(self.workspace, manifest)
 
     def analysis_ico_montage(self, manifest: MediaManifest | None=None):
         return backend_analysis.analysis_ico_montage(self.workspace, manifest)

@@ -20,6 +20,7 @@ from .definitions import NodeDefinition
 from .export_nodes import (
     ApngExportNode,
     GifExportFfmpegNode,
+    GifExportGifskiNode,
     GifExportNode,
     GifOptimizeNode,
     IconComposeNode,
@@ -30,6 +31,7 @@ from .input_nodes import (
     BlankSequenceNode,
     GifInputNode,
     GradientSequenceNode,
+    IcoInputNode,
     ImageSequenceInputNode,
     VideoInputNode,
 )
@@ -71,6 +73,7 @@ NODE_CLASSES: tuple[type[StudioNode], ...] = (
     VideoInputNode,
     ImageSequenceInputNode,
     GifInputNode,
+    IcoInputNode,
     BlankSequenceNode,
     GradientSequenceNode,
     TimeTrimNode,
@@ -99,6 +102,7 @@ NODE_CLASSES: tuple[type[StudioNode], ...] = (
     IconComposeNode,
     GifExportNode,
     GifExportFfmpegNode,
+    GifExportGifskiNode,
     GifOptimizeNode,
     DitherNode,
     ColorQuantizeNode,

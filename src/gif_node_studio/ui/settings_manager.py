@@ -33,6 +33,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 # 任意入口（含 --test / 测试，不经 splash）都能保证图标可用。
 from .. import img_resource_rc  # noqa: F401
 from ..media.gifsicle import configure_gifsicle
+from ..media.gifski import configure_gifski
 from ..media.imagemagick import configure_imagemagick
 from ..core.paths import APP_NAME, user_data_dir
 
@@ -40,6 +41,7 @@ from ..core.paths import APP_NAME, user_data_dir
 APP_ICON_RESOURCE = ":/ico/app_icon.ico"
 WAND_ICON_RESOURCE = ":/ico/wand.png"
 GIFSICLE_ICON_RESOURCE = ":/ico/gifsicle.gif"
+GIFSKI_ICON_RESOURCE = ":/ico/gifski.png"
 PYAV_ICON_RESOURCE = ":/ico/pyav.png"
 
 # ---------------------------------------------------------------------------
@@ -425,8 +427,8 @@ class SettingsDialog(QtWidgets.QDialog):
       背景网格**不在此界面显示**（由工具栏切换并自动保存）。
     - 「关于」页：QScrollArea 滚动展示（内容超高时纵向滚动）——头部应用
       图标（``:/ico/app_icon.ico``）+ 应用名 + 版本，简介、技术栈，
-      ImageMagick / gifsicle 后端小节（带各自图标与运行时摘要）与设置
-      文件位置。
+      ImageMagick / gifsicle / gifski / pyav 后端小节（带各自图标与运行时
+      摘要）与设置文件位置。
     - 点击「重置设置」后发出 ``reset_requested`` 信号，主窗口据此把连线/网格
       样式重新应用到画布。
     """
@@ -585,7 +587,7 @@ class SettingsDialog(QtWidgets.QDialog):
         about_layout.addWidget(desc)
 
         stack = _about_label(
-            "技术栈：PySide6 · NodeGraphQt · PyAV · Pillow · Wand (ImageMagick) · gifsicle"
+            "技术栈：PySide6 · NodeGraphQt · PyAV · Pillow · Wand (ImageMagick) · gifsicle · gifski"
         )
         about_layout.addWidget(stack)
 
@@ -632,6 +634,27 @@ class SettingsDialog(QtWidgets.QDialog):
         about_layout.addLayout(gifsicle_header)
         gifsicle_runtime = _about_label(self._gifsicle_runtime_text(), selectable=True)
         about_layout.addWidget(gifsicle_runtime)
+
+        about_layout.addSpacing(4)
+        about_layout.addWidget(self._separator())
+
+        # gifski：横版 logo（582×190，按高度等比缩放）+ 运行时摘要。
+        gifski_header = QtWidgets.QHBoxLayout()
+        gifski_header.setSpacing(8)
+        gifski_icon = QtWidgets.QLabel()
+        gifski_icon.setPixmap(
+            QtGui.QPixmap(GIFSKI_ICON_RESOURCE).scaledToHeight(
+                36, QtCore.Qt.TransformationMode.SmoothTransformation
+            )
+        )
+        gifski_header.addWidget(gifski_icon)
+        gifski_title = QtWidgets.QLabel("gifski")
+        gifski_title.setStyleSheet("font-weight:bold")
+        gifski_header.addWidget(gifski_title)
+        gifski_header.addStretch()
+        about_layout.addLayout(gifski_header)
+        gifski_runtime = _about_label(self._gifski_runtime_text(), selectable=True)
+        about_layout.addWidget(gifski_runtime)
 
         about_layout.addSpacing(4)
         about_layout.addWidget(self._separator())
@@ -726,6 +749,32 @@ class SettingsDialog(QtWidgets.QDialog):
         lines = [
             f"依赖文件：{runtime.exe}",
             f"版本：{runtime.version or '（未知）'}",
+        ]
+        if runtime.version_line:
+            lines.append(runtime.version_line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _gifski_runtime_text() -> str:
+        """关于页的 gifski 运行时摘要：随包 gifski.exe 路径与版本探测（决策 #124）。
+
+        通过 ``configure_gifski()``（幂等，进程内只探测一次）拿到可执行
+        文件路径与 ``--version`` 解析的版本号；运行时缺失时明确提示。
+        附带许可说明（AGPL-3.0-or-later 随包分发）与官网。
+        """
+        runtime = configure_gifski()
+        if not runtime.available or runtime.exe is None:
+            return (
+                "依赖文件：未找到（runtime/gifski/gifski.exe）\n"
+                "版本：—\n"
+                "GIF 合成(gifski) 节点不可用（CLI 子进程后端缺失；"
+                "运行 scripts/prepare_gifski_runtime.py）。"
+            )
+        lines = [
+            f"依赖文件：{runtime.exe}",
+            f"版本：{runtime.version or '（未知）'}",
+            "许可：AGPL-3.0-or-later（随包分发；项目为单人私有仓库）",
+            "官网：https://gif.ski",
         ]
         if runtime.version_line:
             lines.append(runtime.version_line)

@@ -242,6 +242,32 @@ def _parallel_pil_save_bounded(image: Image.Image, target: Path, semaphore: thre
     finally:
         semaphore.release()
 
+def decode_ico(workspace, path: str | Path) -> tuple[str, ...]:
+    """ICO 输入：解码容器内全部分辨率图像为 PNG，按尺寸从大到小返回路径元组。
+
+    Pillow 的 ICO 插件把每个目录条目作为独立图像暴露（``info["sizes"]``，
+    含 PNG 压缩的 Vista 式条目）；逐条目 ``image.size = (w, h)`` + ``load()``
+    解码后 RGBA 直存 PNG（与格式化路径同语义，不二次编码）。返回顺序 =
+    面积从大到小（同面积按宽度，再按稳定排序），即「解码结果从大到小的 png」。
+    """
+    path = Path(path)
+    output = _job_dir(workspace, "ico")
+    with Image.open(path) as image:
+        sizes = image.info.get("sizes") or ()
+        ordered = sorted(sizes, key=lambda s: (s[0] * s[1], s[0]), reverse=True)
+        written: list[str] = []
+        for width, height in ordered:
+            image.size = (width, height)
+            image.load()
+            rgba = image.convert("RGBA")
+            target = output / f"size_{width}x{height}.png"
+            rgba.save(target, "PNG", compress_level=PNG_CACHE_COMPRESS_LEVEL)
+            written.append(str(target))
+    if not written:
+        raise ValueError("ICO 文件无可用图像")
+    return tuple(written)
+
+
 def extract_first_frame(workspace, manifest: MediaManifest):
     """Return a representative first-frame image path for the manifest.
 

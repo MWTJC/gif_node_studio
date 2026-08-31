@@ -320,6 +320,18 @@ GIFSICLE_COLORMAP = ChoiceGroup(
     default="不使用",
 )
 
+# GIF 合成(gifski)节点（决策 #124）：速度-质量档位——标准不传参数；
+# --fast 快 50% 但质量约降 10%、体积略大；--extra 慢 50% 但质量略升。
+GIFSKI_FAST_MODE = ChoiceGroup(
+    "fast_mode",
+    (
+        ChoiceOption("标准", "normal"),
+        ChoiceOption("快速(快50%)", "fast"),
+        ChoiceOption("精细(慢50%)", "extra"),
+    ),
+    default="标准",
+)
+
 # 平移滚动节点（动效处理）：平移方向——画面内容向该方向滚动，
 # 被推出画布一侧的像素从对侧绕回（无缝衔接）。
 PAN_DIRECTION = ChoiceGroup(

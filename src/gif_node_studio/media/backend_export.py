@@ -13,6 +13,10 @@ from .gifsicle import GIFSICLE_TIMEOUT_S
 from .gifsicle import build_gifsicle_args
 from .gifsicle import configure_gifsicle
 from .gifsicle import require_gifsicle
+from .gifski import GIFSKI_TIMEOUT_S
+from .gifski import build_gifski_args
+from .gifski import configure_gifski
+from .gifski import require_gifski
 from .image_utils import ICON_SIZES
 from .image_utils import PNG_CACHE_COMPRESS_LEVEL
 from .image_utils import _bmp_dib_bytes
@@ -398,6 +402,87 @@ def optimize_gif(progress, manifest: MediaManifest, path: str | Path, *, optimiz
     after = path.stat().st_size
     _progress(progress, 1.0, "优化完成")
     return MediaManifest(MediaKind.ANIMATED_IMAGE, (str(path),)), before, after
+
+def export_gif_gifski(progress, artifact: SequenceArtifact, path: str | Path, *, fps: float=12.0, quality: int=90, motion_quality: int=90, lossy_quality: int=90, width: int=0, height: int=0, fast_mode: str='normal', repeat: int=0, bounce: bool=False, fixed_color: str | None=None, matte: str | None=None):
+    """gifski 编码：PNG 帧序列 → GIF（子进程调用，决策 #124）。
+
+    对应「GIF 合成(gifski)」节点后端：输入为格式化后的 PNG 帧序列，
+    输出为 GIF 文件。gifski 每帧独立调色板（数千色/帧）+ 时域仿色抗闪烁
+    + 有损 LZW——与 wand/FFmpeg 合成节点的「全局共享调色板」为平行路线
+    （见[调研存档](../../docs/research/gif-ecosystem-evaluation.md)）。
+
+    参数（机器键，见 ``options.GIFSKI_FAST_MODE`` 与
+    ``gifski.build_gifski_args``）：``fps`` 播放帧速；``quality``/
+    ``motion_quality``/``lossy_quality`` 三轴质量 1–100；``width``/
+    ``height`` 输出尺寸限制（0 = 不传，用 gifski 默认 ~800×600）；
+    ``fast_mode`` normal/fast/extra；``repeat`` -1/0/N 循环次数；
+    ``bounce`` 正放+倒放；``fixed_color``/``matte`` 调色板固定色/合成底色
+    （'#rrggbb' 或 None）。
+
+    返回 ``path``（绝对/相对按传入）；输出先写临时文件再原子替换到
+    ``path``（失败不破坏旧缓存）。
+    """
+    runtime = configure_gifski()
+    require_gifski(runtime, "GIF 合成(gifski)")
+    if artifact is None or not artifact.frames:
+        raise ValueError("GIF 合成(gifski)：节点无输入")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f"{path.name}.tmp")
+    args = build_gifski_args(
+        artifact.frames,
+        temp,
+        fps=fps,
+        quality=quality,
+        motion_quality=motion_quality,
+        lossy_quality=lossy_quality,
+        width=width,
+        height=height,
+        fast_mode=fast_mode,
+        repeat=repeat,
+        bounce=bounce,
+        fixed_color=fixed_color,
+        matte=matte,
+    )
+    # 单次子进程调用（gifski 无逐帧进度 API；--quiet 下仅退出码可判）；
+    # 期间进度为不确定态，停止落在下一个检查点（与 gifsicle 长调用一致）。
+    _progress(progress, None, "gifski 编码中")
+    # stdin=subprocess.DEVNULL：双击启动（无控制台）下标准句柄无效，
+    # subprocess._get_handles 处理 stdin 继承抛 WinError 6（Nuitka #3030）；
+    # gifski 不读 stdin，显式 DEVNULL 绕开（与探测一致）。
+    # creationflags：无控制台父进程启动控制台子进程会闪黑框，禁止新窗口。
+    try:
+        proc = subprocess.run(
+            [str(runtime.exe), *args],
+            capture_output=True,
+            text=True,
+            timeout=GIFSKI_TIMEOUT_S,
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW_FLAG,
+        )
+    except subprocess.TimeoutExpired:
+        _remove_path(temp)
+        raise ValueError(
+            f"gifski 编码超时（超过 {GIFSKI_TIMEOUT_S} 秒），"
+            "请降低质量/尺寸或减小序列"
+        ) from None
+    if proc.returncode != 0:
+        _remove_path(temp)
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise ValueError(
+            f"gifski 编码失败（exit {proc.returncode}）：{detail[:300]}"
+        )
+    if not temp.is_file() or temp.stat().st_size == 0:
+        _remove_path(temp)
+        raise ValueError("gifski 编码失败：未生成输出文件")
+    try:
+        os.replace(temp, path)
+    except OSError:
+        _remove_path(temp)
+        raise
+    _progress(progress, 1.0, "编码完成")
+    return path
 
 def write_ico(artifact: SequenceArtifact, path: str | Path):
     """把多尺寸序列帧写入 .ico 容器，返回路径。
