@@ -51,7 +51,7 @@ class NodeCategory(str, Enum):
     # 「绿→青绿→青」数据流色相渐变（决策 #117 方案 B-1，见 OKLCH_ANCHORS 注释）。
     FORMAT = ("格式化", ColorSpec.ring("format"))
     SEQUENCE = ("序列处理", ColorSpec.ring("sequence"))
-    PROCESS = ("一般处理", ColorSpec.ring("process"))
+    PROCESS = ("画面处理", ColorSpec.ring("process"))
     MOTION = ("动效处理", ColorSpec.ring("motion"))
     CHANNEL = ("通道处理", ColorSpec.ring("channel"))
     OUTPUT = ("输出", ColorSpec.ring("output"))

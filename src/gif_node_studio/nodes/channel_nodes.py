@@ -22,14 +22,14 @@ class ChannelSplitNode(SequenceNode):
     组件：帧滑条（PanelSpec.scrub_frames）
     """
 
-    NODE_NAME = "RGBA通道分离"
+    NODE_NAME = "RGBA 通道分离"
     ico_center = -0.15
     def __init__(self):
         super().__init__(
             definition=NodeDefinition(
                 "channel_split", self.NODE_NAME, NodeCategory.CHANNEL,
                 # icon=category_icon(NodeCategory.CHANNEL),
-                icon=qta.icon(  # 手动规定icon
+                icon=qta.icon(  # 手动规定icon 手动icon
                     "fa6s.square-full", "mdi.call-split","mdi.square", "mdi.square", "mdi.square",
                     rotated=90,
                     options=[
@@ -52,8 +52,8 @@ class ChannelSplitNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "把 RGBA 四个通道分离为四个独立序列。\n"
-                "输出四个图片序列"
+                "把每帧的 R/G/B/A 四个通道拆成四个灰度序列（灰度值 = 通道值）\n"
+                "输出四个图片序列（R、G、B、A）"
             ),
         )
 
@@ -78,7 +78,7 @@ class ChannelMergeNode(SequenceNode):
     组件：帧滑条（PanelSpec.scrub_frames）
     """
 
-    NODE_NAME = "RGBA通道合并"
+    NODE_NAME = "RGBA 通道合并"
     ico_center = -0.15
     def __init__(self):
         super().__init__(
@@ -105,9 +105,9 @@ class ChannelMergeNode(SequenceNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入图片序列RGBA\n"
-                "透明度通道未连接时按不透明处理（alpha=255）；\n"
-                "各通道序列长度必须一致。\n"
+                "输入 R/G/B/A 四路灰度序列\n"
+                "把各通道灰度值合成一个 RGBA 序列（未连接的透明度通道按不透明处理）\n"
+                "各通道序列长度必须一致\n"
                 "输出图片序列"
             ),
         )
@@ -122,17 +122,17 @@ class ChannelMergeNode(SequenceNode):
 
 
 class AlphaSplitNode(SequenceNode):
-    """A通道提取：输入 RGBA 序列 → 输出 alpha 通道灰度序列（只物化 1 份缓存）。
+    """A 通道提取：输入 RGBA 序列 → 输出 alpha 通道灰度序列（只物化 1 份缓存）。
 
     处理：backend.split_alpha
     参数：无
     组件：帧滑条（PanelSpec.scrub_frames）
 
-    与「RGBA通道分离」的透明度通道语义一致，但不额外物化红/绿/蓝三份
+    与「RGBA 通道分离」的透明度通道语义一致，但不额外物化红/绿/蓝三份
     通道缓存——只想提取 alpha 时无需为 RGBA 分离的 4 份缓存付账。
     """
 
-    NODE_NAME = "A通道提取"
+    NODE_NAME = "A 通道提取"
     ico_center = -0.15
     def __init__(self):
         super().__init__(
@@ -154,8 +154,8 @@ class AlphaSplitNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "提取 alpha（透明度）通道为灰度序列\n"
-                "输出透明度通道序列"
+                "提取透明度（alpha）通道为灰度序列\n"
+                "输出透明度通道序列（灰度值 = 原 alpha）"
             ),
         )
 
@@ -167,14 +167,14 @@ class AlphaSplitNode(SequenceNode):
 
 
 class AlphaMergeNode(SequenceNode):
-    """A通道合并：RGB 序列 + alpha 灰度序列 → RGBA 序列（与 A通道分离 互逆）。
+    """A 通道合并：RGB 序列 + alpha 灰度序列 → RGBA 序列（与 A 通道分离 互逆）。
 
     处理：backend.merge_alpha(rgb, alpha)
     参数：无
     组件：帧滑条（PanelSpec.scrub_frames）
     """
 
-    NODE_NAME = "A通道合并"
+    NODE_NAME = "A 通道合并"
     ico_center = -0.15
     def __init__(self):
         super().__init__(
@@ -198,10 +198,9 @@ class AlphaMergeNode(SequenceNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入图片序列 RGB序列、透明度通道\n"
-                "把 RGB 序列的彩色通道与透明度通道的灰度值合并为 RGBA 序列\n"
-                "透明度通道未连接时按不透明处理（alpha=255）；\n"
-                "长度/帧尺寸须一致。\n"
+                "输入 RGB 序列与透明度通道（灰度序列）\n"
+                "把彩色通道与透明度灰度值合成 RGBA 序列（透明度通道未连接按不透明处理）\n"
+                "长度/帧尺寸须一致\n"
                 "输出图片序列"
             ),
         )

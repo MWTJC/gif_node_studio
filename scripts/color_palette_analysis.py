@@ -12,7 +12,7 @@ CURRENT = {
     "PREFORMAT 预格式化": "#26C6DA",
     "FORMAT 格式化": "#4DB6AC",
     "SEQUENCE 序列处理": "#AB47BC",
-    "PROCESS 一般处理": "#42A5F5",
+    "PROCESS 画面处理": "#42A5F5",
     "MOTION 动效处理": "#FFA726",
     "CHANNEL 通道处理": "#EC407A",
     "OUTPUT 输出": "#EF5350",

@@ -24,6 +24,12 @@ import numpy as np
 import shutil
 ProgressReporter = Callable[[float | None, str], None]
 from .backend_format import extract_first_frame
+from .backend_format import _drain_save_futures
+from .backend_format import _parallel_pil_save_bounded
+from .image_utils import PNG_EXPORT_WORKERS
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 
 def analysis_first_frame(workspace, manifest: MediaManifest | None=None, sequence: SequenceArtifact | None=None):
@@ -97,39 +103,46 @@ def analysis_gif_frames(workspace, imagemagick, progress, manifest: MediaManifes
     try:
         # Wand 路径：逐帧直取 RGBA 字节（_wand_rgba_bytes），存储帧模式
         # 按 frame.page 偏移贴回全画布透明底；合成帧模式先 coalesce。
+        # 解码/统计保持顺序（wand sequence 访问必须串行），PNG 保存交给
+        # 有界线程池并行（内存上界 ≈ PNG_EXPORT_WORKERS×2 帧，同格式化路径）。
         require_wand(imagemagick, "gif优化分析")
         from wand.image import Image as WandImage
 
-        with WandImage(filename=str(path)) as img:
-            if mode == "coalesced":
-                img.coalesce()
-            sequence = list(img.sequence)
-            for index, frame in enumerate(sequence):
-                raw, width, height = _wand_rgba_bytes(frame)
-                left, top = (
-                    (frame.page[2], frame.page[3])
-                    if mode == "stored"
-                    else (0, 0)
-                )
-                array = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4)
-                alpha = array[..., 3]
-                transparent = int((alpha < 255).sum())
-                area = width * height
-                if transparent:
-                    transp_frames += 1
-                    transp_pixels += transparent
-                total_pixels += area
-                rgba = Image.frombuffer(
-                    "RGBA", (width, height), raw, "raw", "RGBA", 0, 1
-                ).copy()
-                if mode == "stored":
-                    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-                    canvas.paste(rgba, (left, top))
-                    rgba = canvas
-                target = output / f"frame_{index:06d}.png"
-                rgba.save(target, "PNG", compress_level=PNG_CACHE_COMPRESS_LEVEL)
-                frames.append(str(target))
-                _progress(progress, (index + 1) / frame_count, "gif优化分析")
+        save_sem = threading.BoundedSemaphore(PNG_EXPORT_WORKERS * 2)
+        futures: list[Future] = []
+        with ThreadPoolExecutor(max_workers=PNG_EXPORT_WORKERS) as pool:
+            with WandImage(filename=str(path)) as img:
+                if mode == "coalesced":
+                    img.coalesce()
+                sequence = list(img.sequence)
+                for index, frame in enumerate(sequence):
+                    raw, width, height = _wand_rgba_bytes(frame)
+                    left, top = (
+                        (frame.page[2], frame.page[3])
+                        if mode == "stored"
+                        else (0, 0)
+                    )
+                    array = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4)
+                    alpha = array[..., 3]
+                    transparent = int((alpha < 255).sum())
+                    area = width * height
+                    if transparent:
+                        transp_frames += 1
+                        transp_pixels += transparent
+                    total_pixels += area
+                    rgba = Image.frombuffer(
+                        "RGBA", (width, height), raw, "raw", "RGBA", 0, 1
+                    ).copy()
+                    if mode == "stored":
+                        canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+                        canvas.paste(rgba, (left, top))
+                        rgba = canvas
+                    target = output / f"frame_{index:06d}.png"
+                    save_sem.acquire()
+                    futures.append(pool.submit(_parallel_pil_save_bounded, rgba, target, save_sem))
+                    frames.append(str(target))
+                    _progress(progress, (index + 1) / frame_count, "gif优化分析")
+                _drain_save_futures(futures)
     except ValueError:
         # 仅 ImageMagick 缺失等显式错误向上抛（coalesce 合成帧必须 wand）。
         if mode == "coalesced":

@@ -53,7 +53,13 @@ class TimeTrimNode(ManifestNode):
                     FloatParam("duration", "持续秒数", default=5.0, minimum=0.1, maximum=3600, widget="spin"),
                 ),
             ),
-            help="输入格式化清单（仅视频）\n滑条定义起点百分比，数值框指定持续秒数；\n输出格式化清单。",
+            help=(
+                "输入格式化清单（仅视频）\n"
+                "按起点与持续时长截取：\n"
+                "开始 %：从源时长百分比位置开始\n"
+                "持续秒数：截取的时长（秒）\n"
+                "输出格式化清单（截取后的片段）"
+            ),
         )
 
     @classmethod
@@ -111,7 +117,13 @@ class FrameTrimNode(ManifestNode):
                     IntParam("duration", "持续帧数", default=30, minimum=1, maximum=100000, widget="spin"),
                 ),
             ),
-            help="输入格式化清单\n滑条定义起点百分比，数值框指定持续帧数（整数；）\n输出格式化清单。",
+            help=(
+                "输入格式化清单\n"
+                "按起点与持续帧数截取：\n"
+                "开始 %：从源时长百分比位置开始\n"
+                "持续帧数：截取的帧数（整数）\n"
+                "输出格式化清单（截取后的片段）"
+            ),
         )
 
     @classmethod
@@ -169,7 +181,10 @@ class FormatNode(ManifestNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入格式化清单\n解码节点，将清单格式化为图片序列；\n输出图片序列。"
+                "输入格式化清单\n"
+                "把清单解码为逐帧 PNG 图片序列：\n"
+                "解码分辨率 %：输出宽高占源素材的比例\n"
+                "输出图片序列"
             ),
         )
 

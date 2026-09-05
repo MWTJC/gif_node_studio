@@ -2,7 +2,11 @@
 
 - ``save_session_clean`` —— 保存时剥离 color/border_color/text_color；
 - ``sanitize_session_data`` —— 加载前按当前节点定义清洗 custom（丢弃失效
-  参数键、choice 回退默认值、未知类型记录），返回 ``SessionLoadReport``。
+  参数键、choice 回退默认值、未知类型记录），返回 ``SessionLoadReport``；
+- 节点类型迁移 —— 已删除节点的旧存档 type_ 自动改写为新节点并翻译参数
+  （决策 #134 色相调整 → 色相/饱和度，见 ``_DEPRECATED_NODE_MIGRATIONS``）；
+- 端口改名兼容 —— 加载前把已改名输入端口的旧连线名改写到新名
+  （NodeGraphQt 按端口名反序列化连线，见 ``_PORT_RENAME_MAP``）。
 """
 
 from __future__ import annotations
@@ -73,6 +77,62 @@ class SessionLoadReport:
 _NODE_COMPAT_CACHE: dict[str, tuple[frozenset[str], NodeDefinition | None]] = {}
 
 
+# 端口改名兼容映射（type_ → {旧端口名: 新端口名}）。端口命名新规：多输入节点
+# 第一端口 = 待处理/主序列（不显示端口名，内部名字不变 → 旧连线天然兼容），
+# 其余端口按作用改简短表意名（分辨率源/长度源/追加物/叠加物）。NodeGraphQt
+# 反序列化按端口名匹配连线（``graph._deserialize`` 的 ``inputs().get(pname)``，
+# 未命中静默丢线）——加载前把旧存档里的旧名改写到新名。
+_PORT_RENAME_MAP: dict[str, dict[str, str]] = {
+    "anime_gif.ResolutionAlignNode": {"序列A": "分辨率源"},
+    "anime_gif.LengthAlignNode": {"序列A": "长度源"},
+    "anime_gif.SequenceAddNode": {"序列B": "追加物"},
+    "anime_gif.SequenceOverlayNode": {"序列B": "叠加物"},
+}
+
+# 节点类型迁移映射（type_ → (新 type_, custom 参数改名表)）：删除的节点类型在
+# 加载时自动改写为新节点，避免旧存档节点被静默丢弃（决策 #134：色相调整 →
+# 色相/饱和度——全图语义等价，旧参数 amount → hue_delta，其余参数用新节点
+# 默认值：色域=全图、饱和/明度=0）。
+_DEPRECATED_NODE_MIGRATIONS: dict[str, tuple[str, dict[str, str]]] = {
+    "anime_gif.HueNode": ("anime_gif.HueSaturationNode", {"amount": "hue_delta"}),
+}
+
+
+def _rename_params(container: dict, renames: dict[str, str]) -> None:
+    """就地改写参数名（旧名 → 新名）；旧名不存在则不动。"""
+    for old_name, new_name in renames.items():
+        if old_name in container:
+            container[new_name] = container.pop(old_name)
+
+
+def _migrate_deprecated_node_types(data: dict) -> None:
+    """把已删除节点的旧存档 type_ 改写为新节点类型（决策 #134）。
+
+    在 ``sanitize_session_data`` 的逐节点清洗**之前**执行：改写后旧存档按
+    新节点的参数定义清洗（choice 回退/未知键丢弃/面板同步），存档文件本身
+    不改写。参数翻译覆盖顶层 custom 与旧存档遗留的 ``node_parameters``
+    内嵌字典两处。
+    """
+    nodes = data.get("nodes")
+    if not isinstance(nodes, dict):
+        return
+    for node_data in nodes.values():
+        if not isinstance(node_data, dict):
+            continue
+        identifier = node_data.get("type_")
+        migration = _DEPRECATED_NODE_MIGRATIONS.get(identifier) if isinstance(identifier, str) else None
+        if migration is None:
+            continue
+        new_type, renames = migration
+        node_data["type_"] = new_type
+        custom = node_data.get("custom")
+        if isinstance(custom, dict):
+            _rename_params(custom, renames)
+            nested = custom.get("node_parameters")
+            if isinstance(nested, dict):
+                _rename_params(nested, renames)
+
+
 def _node_compat_info(identifier: str, factory) -> tuple[frozenset[str], NodeDefinition | None] | None:
     """返回 ``(allowed_custom_keys, definition)``，未注册类型返回 None。
 
@@ -115,6 +175,10 @@ def sanitize_session_data(data: dict, factory) -> SessionLoadReport:
     """
     report = SessionLoadReport()
 
+    # 已删除节点的旧存档先改写为新节点类型（决策 #134：色相调整 → 色相/饱和度），
+    # 之后的清洗按新节点定义进行——旧存档零丢失且不产生 unknown_types 噪音。
+    _migrate_deprecated_node_types(data)
+
     def _coerce_choices(container: dict, definition: NodeDefinition, title: str, reported: set[str]) -> None:
         for param in definition.params:
             if not isinstance(param, ChoiceParam) or not param.choices:
@@ -151,4 +215,33 @@ def sanitize_session_data(data: dict, factory) -> SessionLoadReport:
             nested = custom.get("node_parameters")
             if isinstance(nested, dict):
                 _coerce_choices(nested, definition, title, reported)
+    # 端口改名兼容：在 graph.load_session 之前改写连线端点（见 _PORT_RENAME_MAP）。
+    _remap_connection_ports(data)
     return report
+
+
+def _remap_connection_ports(data: dict) -> None:
+    """把已改名输入端口在旧存档连线中的旧名改写到新名（端口命名新规的兼容层）。
+
+    NodeGraphQt 的会话 ``connections`` 形如 ``{"in"/"out": [节点id, 端口名]}``，
+    反序列化时 ``_deserialize`` 用 ``node.inputs().get(port_name)`` 按**端口名**
+    找端口——端口改名后旧存档该连线会静默丢失（找不到端口直接跳过）。
+    这里按连线端点的节点 type_ 查 ``_PORT_RENAME_MAP``，命中则改写端口名；
+    未改名的端口（含仅隐藏显示、内部名不变的第一端口）原样保留。
+    """
+    nodes = data.get("nodes")
+    if not isinstance(nodes, dict):
+        return
+    for connection in data.get("connections", []):
+        if not isinstance(connection, dict):
+            continue
+        for side in ("in", "out"):
+            endpoint = connection.get(side)
+            if not (isinstance(endpoint, list) and len(endpoint) == 2):
+                continue
+            node_id, port_name = endpoint
+            node_data = nodes.get(node_id) if isinstance(node_id, str) else None
+            identifier = node_data.get("type_") if isinstance(node_data, dict) else None
+            mapping = _PORT_RENAME_MAP.get(identifier) if isinstance(identifier, str) else None
+            if mapping and isinstance(port_name, str) and port_name in mapping:
+                endpoint[1] = mapping[port_name]

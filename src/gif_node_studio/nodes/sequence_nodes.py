@@ -54,7 +54,7 @@ class PingPongNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "把序列倒序输出（倒带）\n"
+                "把序列倒序输出（倒带，只输出反转结果，不自动接回原序列）\n"
                 "输出图片序列"
             ),
         )
@@ -67,14 +67,14 @@ class PingPongNode(SequenceNode):
 
 
 class SequenceAddNode(SequenceNode):
-    """序列相加：输入序列A/序列B，以 A 分辨率为基准缩放 B 后追加到 A 末尾。
+    """序列相加：输入主序列A/追加序列B，以 A 分辨率为基准缩放 B 后追加到 A 末尾。
 
     处理：backend.concat_sequences(a, b, resample, strategy)
     参数：resample/strategy（ChoiceParam 下拉）
     组件：帧滑条（PanelSpec.scrub_frames）
 
-    端口位约定（决策 #94）：待处理序列（被缩放追加的 B）在上、基准序列
-    （决定画布与输出顺序的 A）在下——与「分辨率统一」「序列长度统一」一致。
+    端口位约定：第一端口 = 主序列 A（不显示端口名，A 的全部帧原样保留在
+    输出开头）；第二端口 = 「追加物」（被缩放后追加到 A 末尾的 B）。
     """
 
     NODE_NAME = "序列相加"
@@ -85,8 +85,8 @@ class SequenceAddNode(SequenceNode):
                 "sequence_add", self.NODE_NAME, NodeCategory.SEQUENCE,
                 icon=category_icon(NodeCategory.SEQUENCE,"ri.file-add-fill"),
                 inputs=(
-                    PortDefinition("序列B", PortType.SEQUENCE, show_name=True),
-                    PortDefinition("序列A", PortType.SEQUENCE, show_name=True),
+                    PortDefinition("序列A", PortType.SEQUENCE, show_name=False),
+                    PortDefinition("追加物", PortType.SEQUENCE, show_name=True),
                 ),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(
@@ -98,18 +98,20 @@ class SequenceAddNode(SequenceNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入图片序列B（待处理，被缩放后追加）、序列A（基准，决定画布与输出顺序）\n"
-                "以 A 序列分辨率为基准，把 B 序列按所选缩放算法与缩放策略缩放后追加到 A 末尾。\n"
-                "输出图片序列（= A 全部帧 + 缩放后的 B 帧）"
+                "输入图片序列（主序列）与追加物（要接在后面的序列）\n"
+                "以主序列分辨率为基准，把追加物缩放后接到主序列末尾：\n"
+                "缩放算法：放大/缩小时的画面重采样方式\n"
+                "缩放策略：追加画面不满画布/超出画布时的摆放方式\n"
+                "输出图片序列（= 主序列全部帧 + 缩放后的追加物帧）"
             ),
         )
 
     @classmethod
     def execute(cls, inputs, params, backend):
         if len(inputs) < 2 or inputs[0] is None or inputs[1] is None:
-            raise ValueError("序列相加需要连接两个输入序列（序列B在上、序列A在下）")
-        # 端口调换后：inputs[0] = 待处理序列 B，inputs[1] = 基准序列 A。
-        b, a = inputs[0], inputs[1]
+            raise ValueError("序列相加需要连接两个输入序列（主序列在上、追加物在下）")
+        # inputs[0] = 主序列 A，inputs[1] = 追加物 B。
+        a, b = inputs[0], inputs[1]
         if not isinstance(a, SequenceArtifact) or not isinstance(b, SequenceArtifact):
             raise ValueError("序列相加的两个输入都必须是图片序列")
         return backend.concat_sequences(
@@ -124,14 +126,14 @@ class SequenceAddNode(SequenceNode):
 
 
 class SequenceOverlayNode(SequenceNode):
-    """序列叠加：输入序列A/序列B，把 B 层叠到 A 上（平面叠加，逐帧合成）。
+    """序列叠加：输入基础序列A/叠加序列B，把 B 层叠到 A 上（平面叠加，逐帧合成）。
 
     处理：backend.overlay_sequences(a, b, resample, strategy)
     参数：resample/strategy（ChoiceParam 下拉）
     组件：帧滑条（PanelSpec.scrub_frames）
 
-    端口位约定（决策 #94）：基础序列（A，画布/底层，决定输出长度与分辨率）
-    在上、叠加序列（B，顶层）在下——与「A通道合并」的 RGB/透明度端口顺序一致。
+    端口位约定：第一端口 = 基础序列 A（不显示端口名，决定画布/输出长度）；
+    第二端口 = 「叠加物」（层叠到 A 上的 B）。
     """
 
     NODE_NAME = "序列叠加"
@@ -142,8 +144,8 @@ class SequenceOverlayNode(SequenceNode):
                 "sequence_overlay", self.NODE_NAME, NodeCategory.SEQUENCE,
                 icon=category_icon(NodeCategory.SEQUENCE,"mdi.layers-plus"),
                 inputs=(
-                    PortDefinition("序列A", PortType.SEQUENCE, show_name=True),
-                    PortDefinition("序列B", PortType.SEQUENCE, show_name=True),
+                    PortDefinition("序列A", PortType.SEQUENCE, show_name=False),
+                    PortDefinition("叠加物", PortType.SEQUENCE, show_name=True),
                 ),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(
@@ -154,11 +156,11 @@ class SequenceOverlayNode(SequenceNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入图片序列A（基础，画布/底层）、序列B（叠加，顶层）\n"
-                "把 B 逐帧层叠到 A 上：输出第 i 帧 = A[i] 与按所选缩放算法/策略处理的 B[i] 合成，"
-                "B 的透明通道参与混合。\n"
-                "输出长度 = A 的长度：B 帧不足时直接循环重复，B 长于 A 时取前 len(A) 帧。\n"
-                "缩放策略「不缩放」：B 保持原尺寸 1:1 居中叠放，单轴超出画布时该轴居中裁剪。\n"
+                "输入图片序列（基础，画布/底层）与叠加物（要叠在上面的序列）\n"
+                "把叠加物逐帧层叠到基础序列上（基础序列决定输出长度与画布）：\n"
+                "叠加物帧数不足时循环重复，多于输出长度时取前面部分\n"
+                "缩放算法：放大/缩小时的画面重采样方式\n"
+                "缩放策略：叠加画面不满画布/超出画布时的摆放方式\n"
                 "输出图片序列"
             ),
         )
@@ -166,7 +168,8 @@ class SequenceOverlayNode(SequenceNode):
     @classmethod
     def execute(cls, inputs, params, backend):
         if len(inputs) < 2 or inputs[0] is None or inputs[1] is None:
-            raise ValueError("序列叠加需要连接两个输入序列（序列A在上、序列B在下）")
+            raise ValueError("序列叠加需要连接两个输入序列（基础序列在上、叠加物在下）")
+        # inputs[0] = 基础序列 A，inputs[1] = 叠加物 B。
         a, b = inputs[0], inputs[1]
         if not isinstance(a, SequenceArtifact) or not isinstance(b, SequenceArtifact):
             raise ValueError("序列叠加的两个输入都必须是图片序列")
@@ -221,10 +224,8 @@ class SequenceTrimNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "鼠标在胶片条上拖动蓝色起始手柄/橙色结束手柄选择区间：仅输出区间内的帧\n"
-                "区间 [起始帧, 结束帧)（结束帧不包含）；起始手柄可拖到最左（从头截取）、\n"
-                "结束手柄可拖到最右（截取到末尾），区间恒非空\n"
-                "拖动时实时预览区间首尾帧（起始帧 / 结束帧）\n"
+                "在胶片条上拖动蓝色起始/橙色结束手柄，只保留区间内的帧：\n"
+                "区间 [起始帧, 结束帧)（结束帧不包含），两端手柄均可拖到序列边界\n"
                 "输出图片序列"
             ),
         )
@@ -280,10 +281,8 @@ class SequenceRazorNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "鼠标在胶片条上拖动红色剃刀线，把序列切成两段（PR 剃刀工具式）\n"
-                "切割位置 = 剃刀线所在帧边界：段A = 切割点之前（第 1..cut 帧）、"
-                "段B = 切割点之后（第 cut+1..末尾 帧），两端都非空\n"
-                "拖动时实时预览切割处两侧帧（段A末帧 / 段B首帧）\n"
+                "拖动红色剃刀线，把序列切成两段：\n"
+                "切割位置 = 剃刀线所在帧边界，段A 与段B 两端都非空\n"
                 "输出两个图片序列（段A、段B）"
             ),
         )
@@ -304,8 +303,8 @@ class ResolutionAlignNode(SequenceNode):
     参数：resample/strategy（ChoiceParam 下拉）
     组件：帧滑条（PanelSpec.scrub_frames）
 
-    端口位约定（决策 #94）：待处理序列（被缩放的 B，也是输出）在上、
-    基准序列（决定目标分辨率的 A）在下。
+    端口位约定：第一端口 = 待处理序列 B（不显示端口名，与其他节点单输入直觉
+    一致）；第二端口 = 「分辨率源」（决定目标分辨率的 A）。
     """
 
     NODE_NAME = "分辨率统一"
@@ -316,8 +315,8 @@ class ResolutionAlignNode(SequenceNode):
                 "resolution_align", self.NODE_NAME, NodeCategory.SEQUENCE,
                 icon=category_icon(NodeCategory.SEQUENCE, "mdi.move-resize-variant"),
                 inputs=(
-                    PortDefinition("序列B", PortType.SEQUENCE, show_name=True),
-                    PortDefinition("序列A", PortType.SEQUENCE, show_name=True),
+                    PortDefinition("序列B", PortType.SEQUENCE, show_name=False),
+                    PortDefinition("分辨率源", PortType.SEQUENCE, show_name=True),
                 ),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(
@@ -328,17 +327,19 @@ class ResolutionAlignNode(SequenceNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入图片序列B（待处理，被缩放）、序列A（基准，决定目标分辨率）\n"
-                "以 A 序列分辨率为基准，把 B 序列按所选缩放算法与缩放策略缩放\n"
-                "输出处理后的 B 序列（帧数不变，尺寸 = A 的尺寸）。"
+                "输入图片序列（待处理，被缩放）与分辨率源（决定目标分辨率的序列）\n"
+                "以分辨率源序列的尺寸为目标，把待处理序列逐帧缩放对齐：\n"
+                "缩放算法：放大/缩小时的画面重采样方式\n"
+                "缩放策略：画面不满画布/超出画布时的摆放方式\n"
+                "输出处理后的图片序列（帧数不变，尺寸 = 分辨率源的尺寸）"
             ),
         )
 
     @classmethod
     def execute(cls, inputs, params, backend):
         if len(inputs) < 2 or inputs[0] is None or inputs[1] is None:
-            raise ValueError("分辨率统一需要连接两个输入序列（序列B在上、序列A在下）")
-        # 端口调换后：inputs[0] = 待处理序列 B，inputs[1] = 基准序列 A。
+            raise ValueError("分辨率统一需要连接两个输入序列（待处理序列在上、分辨率源在下）")
+        # inputs[0] = 待处理序列 B，inputs[1] = 分辨率源 A。
         b, a = inputs[0], inputs[1]
         if not isinstance(a, SequenceArtifact) or not isinstance(b, SequenceArtifact):
             raise ValueError("分辨率统一的两个输入都必须是图片序列")
@@ -352,7 +353,6 @@ class ResolutionAlignNode(SequenceNode):
 
 
 
-
 class LengthAlignNode(SequenceNode):
     """序列长度统一：输入序列A/序列B，按 A 的长度统一 B 的帧数（延长方式可选）。
 
@@ -360,8 +360,8 @@ class LengthAlignNode(SequenceNode):
     参数：method（ChoiceParam 下拉）
     组件：帧滑条（PanelSpec.scrub_frames）
 
-    端口位约定（决策 #94）：待处理序列（被统一长度的 B，也是输出）在上、
-    基准序列（决定目标长度的 A）在下。
+    端口位约定：第一端口 = 待处理序列 B（不显示端口名）；第二端口 =
+    「长度源」（决定目标长度的 A）。
     """
 
     NODE_NAME = "序列长度统一"
@@ -372,19 +372,17 @@ class LengthAlignNode(SequenceNode):
                 "length_align", self.NODE_NAME, NodeCategory.SEQUENCE,
                 icon=category_icon(NodeCategory.SEQUENCE, "fa6s.diagram-next"),
                 inputs=(
-                    PortDefinition("序列B", PortType.SEQUENCE, show_name=True),
-                    PortDefinition("序列A", PortType.SEQUENCE, show_name=True),
+                    PortDefinition("序列B", PortType.SEQUENCE, show_name=False),
+                    PortDefinition("长度源", PortType.SEQUENCE, show_name=True),
                 ),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(ChoiceParam("method", "方式", options=LENGTH_ALIGN_METHOD),),
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入图片序列B（待处理，被统一长度）、序列A（基准，决定目标长度）\n"
-                "按 A 序列的长度统一 B：B 短于 A 时按所选方式延长到 A 的长度\n"
-                "方式：循环复制：按原序列周期重复\n"
-                "方式：均匀采样：均匀分布\n"
-                "B 长于 A 时两种方式均保留前 len(A) 帧。\n"
+                "输入图片序列（待处理，被统一长度）与长度源（决定目标长度的序列）\n"
+                "按长度源序列的长度统一待处理序列：短了补帧、长了截断，分辨率不变\n"
+                "方式：补帧时的延长策略（不足长度时的重复/采样方式）\n"
                 "输出图片序列"
             ),
         )
@@ -392,8 +390,8 @@ class LengthAlignNode(SequenceNode):
     @classmethod
     def execute(cls, inputs, params, backend):
         if len(inputs) < 2 or inputs[0] is None or inputs[1] is None:
-            raise ValueError("序列长度统一需要连接两个输入序列（序列B在上、序列A在下）")
-        # 端口调换后：inputs[0] = 待处理序列 B，inputs[1] = 基准序列 A。
+            raise ValueError("序列长度统一需要连接两个输入序列（待处理序列在上、长度源在下）")
+        # inputs[0] = 待处理序列 B，inputs[1] = 长度源 A。
         b, a = inputs[0], inputs[1]
         if not isinstance(a, SequenceArtifact) or not isinstance(b, SequenceArtifact):
             raise ValueError("序列长度统一的两个输入都必须是图片序列")
@@ -430,8 +428,9 @@ class SamplingNode(SequenceNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "输入图片序列\n按定义帧速与输出帧速的比值抽帧；"
-                "\n输出图片序列"
+                "输入图片序列\n"
+                "按定义帧速与输出帧速的比值抽帧（输出帧速低于定义帧速才抽帧）\n"
+                "输出图片序列"
             ),
         )
 
@@ -481,12 +480,11 @@ class StaticHoldNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "消除录屏编码在静止区域的时域噪声（录屏 → GIF 场景）：\n"
-                "静止阈值=逐通道最大允许差值（0-255，录屏 H.264/HEVC 噪声通常 1-3）；\n"
-                "参考帧=前一帧（流式因果，内容变化后自动恢复）/ 首帧"
-                "邻域判定=越大越谨慎（0-8，0=不检查；"
-                "默认 4，防拖尾）。\n"
-                "输出图片序列。\n"
+                "消除录屏/编码在静止区域留下的时域噪声（录屏 → GIF 前处理）：\n"
+                "静止阈值：静止判定允许的逐通道最大差值（0–255，录屏噪声通常 1–3）\n"
+                "参考帧：与哪一帧比较来判定静止\n"
+                "邻域判定：周围也需静止的像素数（0–8，越大越谨慎，默认 4）\n"
+                "输出图片序列（Alpha 保留）"
             ),
         )
 
@@ -533,8 +531,9 @@ class FrameFreezeNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "把序列的首帧或最后一帧**定格**（静态内容副本）延长若干帧：\n"
-                "用于 GIF 片头定格/结尾停留；\n"
+                "把首帧或末帧定格延长若干帧（GIF 片头定格/结尾停留）：\n"
+                "冻结位置：定格在序列开头（第一帧）还是结尾（最后一帧）\n"
+                "冻结延长帧数：延长插入的静态帧数（0 = 不冻结）\n"
                 "输出图片序列"
             ),
         )

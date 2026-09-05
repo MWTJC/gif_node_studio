@@ -11,12 +11,20 @@
     ``dark``，忽略存储值——旧 settings.ini 的 ``light``/``system`` 不再生效；
   * 连线样式（``view/pipe_style``）与背景网格（``view/grid_mode``）：
     由工具栏「连线样式」「背景网格」按钮切换，**不在设置界面显示**，
-    但每次切换后自动保存到设置（应用启动时恢复）。
+    但每次切换后自动保存到设置（应用启动时恢复）；
+  * 自动保存间隔（``autosave/interval_min``，分钟，0=关闭，默认 10 分钟
+    开启）：方案有未保存更改时按此间隔把当前方案自动保存到设置文件旁的
+    ``autosave.json``；程序正常退出清理该文件，异常退出残留 → 下次启动
+    弹窗提示恢复（见关键决策 #131）；
+  * 文件对话框起始目录记忆（``dialog/export_dir`` / ``dialog/import_dir``）：
+    导出保存框记住上次导出目录、输入/打开文件行记住上次导入目录，
+    下次对话框直接落到记忆目录（不记忆则回落程序当前目录）。与连线样式/
+    背景网格同类——**不在设置界面显示**，仅存取（见关键决策 #133）。
 - ``SettingsDialog``：固定尺寸对话框，QTabWidget 切换「设置」/「关于」页；
   「关于」页为 QScrollArea（内容超高时纵向滚动），头部应用图标 + 名称 +
   版本，后端小节带各自图标（``img_resource.qrc`` 编译资源）；
-  「重置设置」恢复默认（深色主题、网格线背景、曲线连线样式）并发出
-  ``reset_requested`` 信号，由主窗口重新应用连线/网格样式。
+  「重置设置」恢复默认（深色主题、网格线背景、曲线连线样式、自动保存
+  10 分钟开启）并发出 ``reset_requested`` 信号，由主窗口重新应用连线/网格样式。
 """
 
 from __future__ import annotations
@@ -157,6 +165,13 @@ CACHE_LIMIT_MIN_MB = 64
 CACHE_LIMIT_MAX_MB = 102400
 DEFAULT_CACHE_LIMIT_MB = 4096
 
+# 自动保存间隔（分钟；0 = 关闭）。默认 10 分钟开启（用户需求）：方案有未保存
+# 更改（dirty）时按此间隔把当前方案自动保存到设置文件旁的 autosave.json；
+# 程序正常退出清理自动保存文件，异常退出残留 → 下次启动弹窗提示恢复。
+AUTOSAVE_MIN_MIN = 0
+AUTOSAVE_MAX_MIN = 120
+DEFAULT_AUTOSAVE_INTERVAL_MIN = 10
+
 # 兼容别名：均由选项组派生（非平行定义）——组内改名时这里在导入期抛 KeyError，
 # 立刻暴露漂移而不是静默沿用旧值。
 THEME_LIGHT = THEME.value_of("浅色")
@@ -203,6 +218,10 @@ class SettingsManager:
     CACHE_LIMIT_MIN_MB = CACHE_LIMIT_MIN_MB
     CACHE_LIMIT_MAX_MB = CACHE_LIMIT_MAX_MB
     DEFAULT_CACHE_LIMIT_MB = DEFAULT_CACHE_LIMIT_MB
+    # 自动保存默认值（模块级常量；类属性镜像）。
+    AUTOSAVE_MIN_MIN = AUTOSAVE_MIN_MIN
+    AUTOSAVE_MAX_MIN = AUTOSAVE_MAX_MIN
+    DEFAULT_AUTOSAVE_INTERVAL_MIN = DEFAULT_AUTOSAVE_INTERVAL_MIN
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path is not None else user_data_dir() / "settings.ini"
@@ -297,6 +316,58 @@ class SettingsManager:
         clamped = max(self.CACHE_LIMIT_MIN_MB, min(self.CACHE_LIMIT_MAX_MB, int(mb)))
         self.set("cache/limit_mb", clamped)
 
+    # --- 自动保存（间隔分钟；0 = 关闭） ---
+
+    def autosave_interval_min(self) -> int:
+        """自动保存间隔（分钟）。0 = 关闭（默认开启，10 分钟）。"""
+        value = self._as_int(
+            self.get("autosave/interval_min", self.DEFAULT_AUTOSAVE_INTERVAL_MIN),
+            self.DEFAULT_AUTOSAVE_INTERVAL_MIN,
+        )
+        return max(self.AUTOSAVE_MIN_MIN, min(self.AUTOSAVE_MAX_MIN, value))
+
+    def set_autosave_interval_min(self, minutes: int) -> None:
+        clamped = max(self.AUTOSAVE_MIN_MIN, min(self.AUTOSAVE_MAX_MIN, int(minutes)))
+        self.set("autosave/interval_min", clamped)
+
+    def autosave_path(self) -> Path:
+        """自动保存文件路径：与设置文件同目录（隔离到设置/测试注入的目录）。"""
+        return self.path.parent / "autosave.json"
+
+    # --- 文件对话框起始目录记忆（导出保存框/导入打开框；设置界面不可见，
+    # 与连线样式/背景网格同类——工具栏切换式自动保存，见决策 #133） ---
+
+    def last_export_dir(self) -> str:
+        """上次导出保存目录；未记忆或目录已失效返回 ''（对话框回落默认位置）。"""
+        return self._remembered_dir("dialog/export_dir")
+
+    def set_last_export_dir(self, value: str) -> None:
+        """记录上次导出目录；无效值（空/不存在）不落盘。"""
+        self._store_dir("dialog/export_dir", value)
+
+    def last_import_dir(self) -> str:
+        """上次导入/打开文件所在目录；未记忆或目录已失效返回 ''。"""
+        return self._remembered_dir("dialog/import_dir")
+
+    def set_last_import_dir(self, value: str) -> None:
+        """记录上次导入目录；无效值（空/不存在）不落盘。"""
+        self._store_dir("dialog/import_dir", value)
+
+    def _remembered_dir(self, key: str) -> str:
+        value = self.get(key, "")
+        if value and Path(str(value)).is_dir():
+            return str(value)
+        return ""
+
+    def _store_dir(self, key: str, value: str) -> None:
+        raw = str(value or "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+            if not path.is_dir():
+                return  # 只记忆仍然存在的目录（移动介质拔除/删除后自动失效）
+            raw = str(path)
+        self.set(key, raw)
+
     # --- 重置 ---
 
     def reset(self) -> None:
@@ -309,6 +380,12 @@ class SettingsManager:
         # 缓存设置：默认值即合法，直接写存储值（不做可用性探测，避免副作用）。
         self.set("cache/dir", self.DEFAULT_CACHE_DIR)
         self.set_cache_limit_mb(self.DEFAULT_CACHE_LIMIT_MB)
+        # 自动保存：默认 10 分钟开启。
+        self.set_autosave_interval_min(self.DEFAULT_AUTOSAVE_INTERVAL_MIN)
+        # 文件对话框目录记忆：重置后回到无记忆状态（'' → 对话框回落当前目录）。
+        for key in ("dialog/export_dir", "dialog/import_dir"):
+            self._settings.remove(key)
+        self._settings.sync()
 
 
 # ---------------------------------------------------------------------------
@@ -422,9 +499,10 @@ class SettingsDialog(QtWidgets.QDialog):
     """设置对话框：固定尺寸；QTabWidget 切换「设置」/「关于」页。
 
     - 「设置」页：颜色主题固定为深色（决策 #90，下拉置灰只读展示，不可
-      调整；暂无细化亮色主题的计划）、透明背景色、缓存管理、「重置设置」
-      按钮（恢复默认：深色主题、网格线背景、曲线连线样式）；连线样式/
-      背景网格**不在此界面显示**（由工具栏切换并自动保存）。
+      调整；暂无细化亮色主题的计划）、透明背景色、缓存管理（目录/上限/
+      实时用量）、自动保存间隔（分钟，0=关闭）、「重置设置」按钮（恢复
+      默认：深色主题、网格线背景、曲线连线样式、自动保存 10 分钟）；
+      连线样式/背景网格**不在此界面显示**（由工具栏切换并自动保存）。
     - 「关于」页：QScrollArea 滚动展示（内容超高时纵向滚动）——头部应用
       图标（``:/ico/app_icon.ico``）+ 应用名 + 版本，简介、技术栈，
       ImageMagick / gifsicle / gifski / pyav 后端小节（带各自图标与运行时
@@ -439,7 +517,7 @@ class SettingsDialog(QtWidgets.QDialog):
     alpha_bg_changed = QtCore.Signal(str)
 
     DIALOG_WIDTH = 440
-    DIALOG_HEIGHT = 500
+    DIALOG_HEIGHT = 580
 
     def __init__(
         self,
@@ -521,6 +599,21 @@ class SettingsDialog(QtWidgets.QDialog):
         self._cache_usage_timer.setInterval(1000)
         self._cache_usage_timer.timeout.connect(self._refresh_cache_usage)
         self._refresh_cache_usage()
+
+        # ---- 自动保存：间隔分钟（0 = 关闭），变更立即保存 ----
+        self.autosave_interval_spin = QtWidgets.QSpinBox()
+        self.autosave_interval_spin.setRange(settings.AUTOSAVE_MIN_MIN, settings.AUTOSAVE_MAX_MIN)
+        self.autosave_interval_spin.setSuffix(" 分钟")
+        self.autosave_interval_spin.setValue(settings.autosave_interval_min())
+        self.autosave_interval_spin.valueChanged.connect(self._on_autosave_interval_changed)
+        form.addRow("自动保存间隔", self.autosave_interval_spin)
+        autosave_hint = QtWidgets.QLabel(
+            "0 = 关闭。方案有未保存更改时，按此间隔自动保存到设置文件旁的 autosave.json；"
+            "程序正常退出自动清理，上次异常退出后下次启动会弹窗提示恢复。"
+        )
+        autosave_hint.setWordWrap(True)
+        autosave_hint.setStyleSheet("color:#909090;")
+        form.addRow(autosave_hint)
 
         hint = QtWidgets.QLabel("「连线样式」「背景网格」由工具栏按钮切换，变更后自动保存到设置。")
         hint.setWordWrap(True)
@@ -814,6 +907,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings.set_cache_limit_mb(mb)
         self._refresh_cache_usage()
 
+    def _on_autosave_interval_changed(self, minutes: int) -> None:
+        """自动保存间隔变更：立即保存（钳制到合法范围后落盘）。"""
+        self.settings.set_autosave_interval_min(minutes)
+
     def _refresh_cache_usage(self) -> None:
         """刷新「当前缓存用量」标签：用量 / 上限（MB），附带占用百分比。"""
         limit_mb = self.settings.cache_limit_mb()
@@ -848,6 +945,8 @@ class SettingsDialog(QtWidgets.QDialog):
         # 缓存设置同步回默认（目录直接回写，上限经 valueChanged 自动保存）。
         self.cache_dir_edit.setText(self.settings.cache_dir())
         self.cache_limit_spin.setValue(self.settings.cache_limit_mb())
+        # 自动保存间隔同步回默认（经 valueChanged 自动保存）。
+        self.autosave_interval_spin.setValue(self.settings.autosave_interval_min())
         self.reset_requested.emit()
 
     @staticmethod

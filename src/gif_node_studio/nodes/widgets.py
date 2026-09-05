@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from loguru import logger
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -75,12 +77,42 @@ class StudioComboBox(QtWidgets.QComboBox):
         # self.setMaxVisibleItems(20)  # 当 combobox-popup: 0 时，默认MaxVisibleItems为10，此处留调节可能性
 
 
+def file_dialog_start(current: str, remembered: str, dialog: str) -> str:
+    """文件/目录浏览框的起始值（决策 #133 的「上次导入目录」记忆）。
+
+    - ``current``：参数当前已填值（可能为空/已失效的路径）；
+    - ``remembered``：记忆目录（无则 ''）；
+    - ``dialog``：「open」/「directory」/「save」。
+
+    规则：
+    - ``open``：当前值仍有效（文件本身或所在目录存在）→ 沿用，对话框在其
+      目录打开并选中该文件；否则回落记忆目录；都没有 → ''（QFileDialog
+      默认程序当前目录，等同无记忆旧行为）。
+    - ``directory``：当前值为存在的目录 → 沿用；否则回落记忆目录。
+    - ``save``：纯参数值（导出保存框另走 MainWindow 的导出记忆，不经此）。
+    """
+    cur = str(current or "").strip()
+    if cur:
+        path = Path(cur)
+        if dialog == "directory":
+            if path.is_dir():
+                return cur
+        elif dialog == "save":
+            return cur
+        elif path.exists() or path.parent.is_dir():
+            return cur
+    return remembered or ""
+
+
 class FilePathWidget(QtWidgets.QWidget):
     changed = QtCore.Signal(str)
 
-    def __init__(self, parameter: ParamDefinition, parent=None):
+    def __init__(self, parameter: ParamDefinition, parent=None, panel=None):
         super().__init__(parent)
         self.parameter = parameter
+        # 归属的 ParameterPanel（可选）：面板由 MainWindow._bind_node 注入
+        # 设置管理器（panel.settings），浏览时读取/回写「上次导入目录」记忆。
+        self.panel = panel
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QtWidgets.QLineEdit()
@@ -91,21 +123,34 @@ class FilePathWidget(QtWidgets.QWidget):
         self.edit.editingFinished.connect(lambda: self.changed.emit(self.edit.text()))
         self.button.clicked.connect(self.browse)
 
+    def _dialog_settings(self):
+        """归属面板注入的设置管理器；未绑定（测试/预览等）返回 None。"""
+        panel = getattr(self, "panel", None)
+        return getattr(panel, "settings", None) if panel is not None else None
+
     def browse(self) -> None:
         parameter = self.parameter
+        settings = self._dialog_settings()
+        remembered = settings.last_import_dir() if settings is not None else ""
         if parameter.dialog == "directory":
-            value = QtWidgets.QFileDialog.getExistingDirectory(None, parameter.label, self.edit.text())
+            start = file_dialog_start(self.edit.text(), remembered, "directory")
+            value = QtWidgets.QFileDialog.getExistingDirectory(None, parameter.label, start)
         elif parameter.dialog == "save":
             value, _ = QtWidgets.QFileDialog.getSaveFileName(None, parameter.label, self.edit.text(), parameter.filter)
         else:
+            start = file_dialog_start(self.edit.text(), remembered, "open")
             value, _ = QtWidgets.QFileDialog.getOpenFileName(
-                None, parameter.label, self.edit.text(), parameter.filter
+                None, parameter.label, start, parameter.filter
             )
         if value:
             self.edit.setText(value)
             self.changed.emit(value)
             # 文件浏览事件：输入节点选择源文件/目录（排障可回溯用户数据来源）。
             logger.info("文件浏览（{}）→ {}", parameter.label, value)
+            # 记忆「上次导入目录」（save 型参数当前无使用方，不记）。
+            if settings is not None and parameter.dialog != "save":
+                directory = value if parameter.dialog == "directory" else str(Path(value).parent)
+                settings.set_last_import_dir(directory)
 
 
 

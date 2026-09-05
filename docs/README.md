@@ -20,6 +20,7 @@
 | 页面 | 内容 |
 |---|---|
 | [节点体系约定](node-conventions.md) | 构造注入声明、注册表、族基类 |
+| [新增节点：作者指南](node-authoring-guide.md) | 从设计到收尾的完整操作流程（后端/注册/测试/文档/注意事项） |
 | [预览机制](preview.md) | 清单携带预览图、链式预览、帧滑条、1:1 查看 |
 | [规格合成语义](spec-composition.md) | 裁剪/截取链式「合成」而非「替换」 |
 | [NodeGraphQt 显示层修复](nodegraphqt-fixes.md) | `StudioNodeItem` 标题撑宽 / widget 居中 |
@@ -41,7 +42,9 @@
   - [决策 #81–#90](decisions/81-90.md)
   - [决策 #91–#100](decisions/91-100.md)
   - [决策 #101–#110](decisions/101-110.md)
-  - [决策 #111–#118](decisions/111-118.md)
+  - [决策 #111–#120](decisions/111-120.md)
+  - [决策 #121–#130](decisions/121-130.md)
+  - [决策 #131–#140](decisions/131-140.md)
 
 ### 4. 质量与发布
 
@@ -55,7 +58,7 @@
 
 | 页面 | 内容 |
 |---|---|
-| [节点清单](node-list.md) | 49 个节点（`NODE_CLASSES` 顺序） |
+| [节点清单](node-list.md) | 53 个节点（`NODE_CLASSES` 顺序） |
 | [运存缓存可行性评估](research/memory-cache-evaluation.md) | 中间产物磁盘缓存改运存的收益/风险/分档方案/工作量 |
 | [缓存管理增强可行性评估](research/cache-management-evaluation.md) | 缓存总大小限制 + 可调缓存路径 |
 | [PS 颜色深度对齐研究存档](research/ps-color-reduction.md) | 已回退实验；2026-08 黑盒差分结论 |

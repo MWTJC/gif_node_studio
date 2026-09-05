@@ -152,6 +152,10 @@ def main(argv: list[str] | None = None) -> int:
             # 启动画面随主窗口首帧显示后关闭（finish 等待主窗口真正上屏，过渡无闪断）。
             if splash is not None:
                 splash.finish(window)
+            # 自动保存恢复（决策 #131）：上次异常退出残留 autosave.json → 弹窗
+            # 提示恢复（画布为空；无残留则直接返回，零打扰）。正常退出会清理该
+            # 文件，此处通常不会触发。
+            window.prompt_autosave_restore()
         except Exception:
             logger.exception("启动引导失败")
             _startup_error(

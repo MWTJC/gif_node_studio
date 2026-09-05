@@ -60,6 +60,9 @@ class ParameterPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self.definition = definition
         self.widgets: dict[str, QtWidgets.QWidget] = {}
+        # 设置管理器：MainWindow._bind_node 注入（面板构造期尚不存在）；
+        # 文件选择行（FilePathWidget）经 panel.settings 读/写「上次导入目录」记忆。
+        self.settings = None
         spec = definition.panel
         self._scrub_frames = spec.scrub_frames
         self._preview_1to1 = spec.preview_1to1
@@ -197,7 +200,7 @@ class ParameterPanel(QtWidgets.QWidget):
 
     def make_parameter_widget(self, parameter: ParamDefinition):
         if isinstance(parameter, FileParam):
-            widget = FilePathWidget(parameter)
+            widget = FilePathWidget(parameter, panel=self)
             widget.edit.setText(str(parameter.default))
             widget.changed.connect(lambda _value: self.changed.emit(self.values()))
             return widget

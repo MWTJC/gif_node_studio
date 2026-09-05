@@ -235,7 +235,7 @@
     "0x2a72cd69290":{
       "type_":"anime_gif.AlphaMergeNode",
       "icon":null,
-      "name":"A\u901a\u9053\u5408\u5e76",
+      "name":"A \u901a\u9053\u5408\u5e76",
       "disabled":false,
       "selected":false,
       "visible":true,
@@ -474,7 +474,7 @@
     "0x2a72cd7bd90":{
       "type_":"anime_gif.IconComposeNode",
       "icon":null,
-      "name":"ico\u5408\u6210",
+      "name":"ICO \u5408\u6210",
       "disabled":false,
       "selected":false,
       "visible":true,
@@ -497,7 +497,7 @@
     "0x2a72cdaa6d0":{
       "type_":"anime_gif.IcoAnalysisNode",
       "icon":null,
-      "name":"ico\u5206\u8fa8\u7387\u67e5\u770b",
+      "name":"ICO \u5206\u8fa8\u7387\u67e5\u770b",
       "disabled":false,
       "selected":false,
       "visible":true,
@@ -719,7 +719,7 @@
     "0x2a72cddb410":{
       "type_":"anime_gif.AlphaMergeNode",
       "icon":null,
-      "name":"A\u901a\u9053\u5408\u5e76 1",
+      "name":"A \u901a\u9053\u5408\u5e76 1",
       "disabled":false,
       "selected":false,
       "visible":true,
@@ -793,7 +793,7 @@
     "0x2a72cdf4290":{
       "type_":"anime_gif.AlphaMergeNode",
       "icon":null,
-      "name":"A\u901a\u9053\u5408\u5e76 2",
+      "name":"A \u901a\u9053\u5408\u5e76 2",
       "disabled":false,
       "selected":false,
       "visible":true,
@@ -1232,7 +1232,7 @@
     "0x2a72ce59810":{
       "type_":"anime_gif.AlphaMergeNode",
       "icon":null,
-      "name":"A\u901a\u9053\u5408\u5e76 3",
+      "name":"A \u901a\u9053\u5408\u5e76 3",
       "disabled":false,
       "selected":false,
       "visible":true,

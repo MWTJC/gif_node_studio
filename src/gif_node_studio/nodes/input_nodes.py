@@ -45,7 +45,10 @@ class VideoInputNode(StudioNode):
                 outputs=(PortDefinition("格式化清单", PortType.MANIFEST),),
                 params=(VideoFileParam("path", "视频文件", default=""),),
             ),
-            help="选择单个视频文件，\n输出格式化清单。",
+            help=(
+                "选择单个视频文件\n"
+                "输出格式化清单（预览为首帧）"
+            ),
         )
 
     @classmethod
@@ -79,7 +82,11 @@ class ImageSequenceInputNode(StudioNode):
                 outputs=(PortDefinition("格式化清单", PortType.MANIFEST),),
                 params=(ImageFileParam("path", "序列首图", default=""),),
             ),
-            help="选择诸如“abc_0001.png”图片序列的首张并自动识别，\n也可选择单张图片作为单帧序列输入；\n输出格式化清单。",
+            help=(
+                "选择编号图片序列的首张（如 abc_0001.png）并自动识别整段；\n"
+                "也可选单张图片作为单帧序列\n"
+                "输出格式化清单（预览为首帧）"
+            ),
         )
 
     @classmethod
@@ -101,14 +108,14 @@ class ImageSequenceInputNode(StudioNode):
 
 
 class GifInputNode(StudioNode):
-    """gif输入。
+    """GIF 输入。
 
     处理：MediaManifest(MediaKind.ANIMATED_IMAGE, (path,)) 构造 + backend.extract_first_frame（首帧预览）
     参数：path（GifFileParam 文件选择行，默认空）
     组件：无增量（默认预览框）
     """
 
-    NODE_NAME = "gif输入"
+    NODE_NAME = "GIF 输入"
 
     def __init__(self):
         super().__init__(
@@ -118,7 +125,10 @@ class GifInputNode(StudioNode):
                 outputs=(PortDefinition("格式化清单", PortType.MANIFEST),),
                 params=(GifFileParam("path", "GIF 文件", default=""),),
             ),
-            help="导入单个 GIF 文件，\n输出格式化清单",
+            help=(
+                "导入单个 GIF 文件\n"
+                "输出格式化清单（预览为首帧）"
+            ),
         )
 
     @classmethod
@@ -134,7 +144,7 @@ class GifInputNode(StudioNode):
 
 
 class IcoInputNode(StudioNode):
-    """ico输入。
+    """ICO 输入。
 
     处理：backend.decode_ico 解码容器内全部分辨率为 PNG（从大到小）→
           MediaManifest(STATIC_SEQUENCE) 构造 + extract_first_frame（预览=最大分辨率）
@@ -142,7 +152,7 @@ class IcoInputNode(StudioNode):
     组件：无增量（默认预览框）
     """
 
-    NODE_NAME = "ico输入"
+    NODE_NAME = "ICO 输入"
 
     def __init__(self):
         super().__init__(
@@ -153,9 +163,9 @@ class IcoInputNode(StudioNode):
                 params=(IcoFileParam("path", "ICO 文件", default=""),),
             ),
             help=(
-                "选择单个 ICO 图标文件，\n"
-                "解码为从大到小的 PNG 列表（清单源文件），\n"
-                "输出格式化清单。"
+                "选择单个 ICO 图标文件\n"
+                "解码为从大到小的 PNG 列表\n"
+                "输出格式化清单（预览为最大分辨率）"
             ),
         )
 
@@ -202,8 +212,8 @@ class BlankSequenceNode(StudioNode):
             ),
             help=(
                 "无输入\n"
-                "生成纯白不透明图片序列，可定义分辨率（宽×高）与帧数（均为整数）；\n"
-                "供「序列相加」「分辨率统一」等多输入节点作对齐基准/背景。\n"
+                "生成纯白不透明图片序列，可定义宽高、帧数与背景色\n"
+                "常作为「序列相加」「分辨率统一」等多输入节点的对齐基准/背景\n"
                 "输出图片序列"
             ),
         )
@@ -246,13 +256,15 @@ class GradientSequenceNode(StudioNode):
                     IntParam("frames", "帧数", default=1, minimum=1, maximum=100000, widget="spin"),
                     ColorParam("start_color", "起点颜色", default="#000000"),
                     ColorParam("end_color", "终点颜色", default="#ffffff"),
-                    FloatParam("angle", "渐变角度", default=0, minimum=-180, maximum=180, widget="slider"),
+                    FloatParam("angle", "渐变角度 °", default=0, minimum=-180, maximum=180, widget="slider"),
                 ),
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
                 "无输入\n"
-                "生成线性渐变图片序列\n"
+                "生成线性渐变图片序列，可定义宽高、帧数与渐变：\n"
+                "起点颜色/终点颜色：渐变两端颜色（色块选取）\n"
+                "渐变角度：渐变方向\n"
                 "输出图片序列"
             ),
         )

@@ -1,13 +1,15 @@
-"""一般处理节点：颜色调整/二值化/灰度/反相/超级键/旋转/纵横比挤压/量化。"""
+"""画面处理节点（原「一般处理」）：逐帧处理画面内容——颜色调整/二值化/灰度/反相/
+键控/旋转/纵横比挤压/翻转/裁剪/缩放/颜色量化。与「序列处理」的分界：每个输出帧
+仅由对应输入帧决定（帧数不变、无跨帧关系）。"""
 
 from __future__ import annotations
 
 import math
 
 from PIL import Image
-
+import qtawesome as qta
 from ..core.domain import CropSpec, SequenceArtifact
-from ..core.options import COLOR_REDUCE_ALGORITHM, CROP_ASPECT, DITHER, FLIP_DIRECTION, QUANTIZE_COLORSPACE, QUANTIZE_DITHER
+from ..core.options import COLOR_REDUCE_ALGORITHM, CROP_ASPECT, DITHER, FLIP_DIRECTION, HUE_SAT_TARGET, QUANTIZE_COLORSPACE, QUANTIZE_DITHER, RESAMPLE
 from ..media.palettes import POSTERIZE_LEVELS, ordered_dither_map_names
 from .crop_overlay import make_crop_panel
 from .definitions import (
@@ -44,9 +46,13 @@ class BrightnessNode(SequenceNode):
                 icon=category_icon(NodeCategory.PROCESS, "mdi.brightness-6"),
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
-                params=(FloatParam("amount", "亮度", default=0.0, minimum=-100, maximum=100),),
+                params=(FloatParam("amount", "亮度 %", default=0.0, minimum=-100, maximum=100),),
             ),
-            help="输入图片序列\n调整亮度。\n输出图片序列",
+            help=(
+                "输入图片序列\n"
+                "亮度 %：0 = 不变，负值变暗、正值变亮\n"
+                "输出图片序列（Alpha 保留）"
+            ),
         )
 
     @classmethod
@@ -73,9 +79,13 @@ class SaturationNode(SequenceNode):
                 icon=category_icon(NodeCategory.PROCESS, "ri.contrast-2-fill"),
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
-                params=(FloatParam("amount", "饱和度", default=0.0, minimum=-100, maximum=200),),
+                params=(FloatParam("amount", "饱和度 %", default=0.0, minimum=-100, maximum=200),),
             ),
-            help="输入图片序列\n调整饱和度。\n输出图片序列",
+            help=(
+                "输入图片序列\n"
+                "饱和度 %：0 = 不变，负值褪色、正值更鲜艳\n"
+                "输出图片序列（Alpha 保留）"
+            ),
         )
 
     @classmethod
@@ -85,31 +95,84 @@ class SaturationNode(SequenceNode):
 
 
 
-class HueNode(SequenceNode):
-    """色相调整。
+def _hex_hue_degrees(hex_color: str) -> float:
+    """'#rrggbb' → 色相（0..360 度；RGB→HSV 的 H，自定义(取色器)中心）。"""
+    from colorsys import rgb_to_hsv
 
-    处理：backend.adjust_color(hue=amount)
-    参数：amount（FloatParam 滑条+数值框，-180..180）
+    r, g, b = (int(hex_color[index:index + 2], 16) for index in (1, 3, 5))
+    return float(rgb_to_hsv(r / 255, g / 255, b / 255)[0] * 360.0)
+
+
+class HueSaturationNode(SequenceNode):
+    """色相/饱和度：PS「色相/饱和度」对话框复刻（取代已删除的「色相调整」）。
+
+    处理：backend.hue_sat_range_sequence(center_hue, hue_delta, sat_delta,
+          light_delta, range_half, feather_deg)
+    参数：target（ChoiceParam 色域下拉，唯一源头 options.HUE_SAT_TARGET）、
+          target_color（ColorParam 色块，仅色域=自定义(取色器) 时决定中心色相）、
+          hue_delta/sat_delta/light_delta（FloatParam 滑条+数值框）、
+          range_half/feather（FloatParam 滑条+数值框，仅非「全图」生效）
     组件：帧滑条（PanelSpec.scrub_frames）
+
+    与「色相调整」关系（决策 #134）：色相调整 = 全图色相旋转（PIL HSV point，
+    adjust_color 的 hue 分支）与新节点「全图」作用域完全重合，已删除；旧存档
+    hue 节点加载时自动迁移为本节点（色域=全图、色相=原值，见 ui/session.py
+    节点类型迁移映射）。「亮度调整/饱和度调整」保留（PIL ImageEnhance 公式，
+    与新节点 PS 式明度/饱和度不同）。
     """
 
-    NODE_NAME = "色相调整"
+    NODE_NAME = "色相/饱和度"
 
     def __init__(self):
         super().__init__(
             definition=NodeDefinition(
-                "hue", self.NODE_NAME, NodeCategory.PROCESS,
-                icon=category_icon(NodeCategory.PROCESS, ),
+                "hue_sat", self.NODE_NAME, NodeCategory.PROCESS,
+                icon=category_icon(NodeCategory.PROCESS, "mdi6.palette-swatch"),
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
-                params=(FloatParam("amount", "色相", default=0.0, minimum=-180, maximum=180),),
+                params=(
+                    ChoiceParam("target", "色域", options=HUE_SAT_TARGET),
+                    ColorParam("target_color", "目标颜色", default="#ff0000"),
+                    FloatParam("hue_delta", "色相 °", default=0.0, minimum=-180, maximum=180),
+                    FloatParam("sat_delta", "饱和度 %", default=0.0, minimum=-100, maximum=100),
+                    FloatParam("light_delta", "明度 %", default=0.0, minimum=-100, maximum=100),
+                    # 范围/过渡只对选区（非全图）有意义：全图时置灰。
+                    FloatParam("range_half", "范围半宽 °", default=15.0, minimum=0, maximum=180,
+                               enabled_when=("target", HUE_SAT_TARGET.labels[1:])),
+                    FloatParam("feather", "过渡半宽 °", default=30.0, minimum=0, maximum=180,
+                               enabled_when=("target", HUE_SAT_TARGET.labels[1:])),
+                ),
+                panel=PanelSpec(scrub_frames=True),
             ),
-            help="输入图片序列\n旋转色相。\n输出图片序列",
+            help=(
+                "输入图片序列\n"
+                "按 PS「色相/饱和度」调整画面颜色（可只作用于目标色附近，也可全图）：\n"
+                "色域：作用范围\n"
+                "目标颜色：仅色域=自定义(取色器)时生效\n"
+                "色相 °/饱和度 %/明度 %：调整量（0 = 不变）\n"
+                "范围半宽 °/过渡半宽 °：色域内全量生效、向外柔和衰减的宽度\n"
+                "输出图片序列（Alpha 保留）"
+            ),
         )
 
     @classmethod
     def execute(cls, inputs, params, backend):
-        return backend.adjust_color(cls.sequence(inputs), hue=float(params["amount"]))
+        mode = HUE_SAT_TARGET.key_of(str(params["target"]))
+        if mode == "master":
+            center_hue = None  # 全图：蒙版恒 1（PS Master）
+        elif mode == "custom":
+            center_hue = _hex_hue_degrees(str(params["target_color"]))
+        else:
+            center_hue = float(HUE_SAT_TARGET.value_for_key(mode))
+        return backend.hue_sat_range_sequence(
+            cls.sequence(inputs),
+            center_hue=center_hue,
+            hue_delta=float(params["hue_delta"]),
+            sat_delta=float(params["sat_delta"]),
+            light_delta=float(params["light_delta"]),
+            range_half=float(params["range_half"]),
+            feather_deg=float(params["feather"]),
+        )
 
 
 
@@ -137,7 +200,11 @@ class ColorBalanceNode(SequenceNode):
                     FloatParam("blue", "蓝", default=0.0, minimum=-100, maximum=100),
                 ),
             ),
-            help="输入图片序列\n分别缩放红、绿、蓝通道，不处理 Alpha。\n输出图片序列",
+            help=(
+                "输入图片序列\n"
+                "分别增减红、绿、蓝通道强度（每个 0 = 不变，负值减弱、正值增强）\n"
+                "输出图片序列（Alpha 保留）"
+            ),
         )
 
     @classmethod
@@ -183,8 +250,8 @@ class BinarizeNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "转灰度后按阈值二值化。\n"
-                "输出图片序列"
+                "转灰度后按阈值二值化：像素值大于等于阈值转白、小于阈值转黑\n"
+                "输出图片序列（只保留黑/白两色，Alpha 保留）"
             ),
         )
 
@@ -214,7 +281,11 @@ class GrayscaleNode(SequenceNode):
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 panel=PanelSpec(scrub_frames=True),
             ),
-            help="输入图片序列\n转灰度（R==G==B），Alpha 保留。\n输出图片序列",
+            help=(
+                "输入图片序列\n"
+                "把每帧转为灰度，丢弃颜色信息\n"
+                "输出图片序列（Alpha 保留）"
+            ),
         )
 
     @classmethod
@@ -241,10 +312,14 @@ class ContrastNode(SequenceNode):
                 icon=category_icon(NodeCategory.PROCESS, "ri.contrast-2-line"),
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
-                params=(FloatParam("amount", "对比度", default=0.0, minimum=-100, maximum=100),),
+                params=(FloatParam("amount", "对比度 %", default=0.0, minimum=-100, maximum=100),),
                 panel=PanelSpec(scrub_frames=True),
             ),
-            help="输入图片序列\n调整对比度（正值增强、负值减弱），Alpha 保留。\n输出图片序列",
+            help=(
+                "输入图片序列\n"
+                "对比度 %：0 = 不变，负值减弱、正值增强\n"
+                "输出图片序列（Alpha 保留）"
+            ),
         )
 
     @classmethod
@@ -275,8 +350,8 @@ class InvertNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "把每帧颜色反相，Alpha 保留。\n"
-                "输出图片序列"
+                "把每帧颜色反相（黑变白、红变青）\n"
+                "输出图片序列（Alpha 保留）"
             ),
         )
 
@@ -301,7 +376,14 @@ class SuperKeyNode(SequenceNode):
         super().__init__(
             definition=NodeDefinition(
                 "super_key", self.NODE_NAME, NodeCategory.PROCESS,
-                icon=category_icon(NodeCategory.PROCESS, "mdi.opacity"),  # mdi6.square-opacity
+                # icon=category_icon(NodeCategory.PROCESS, "mdi.opacity"),  # mdi6.square-opacity
+                icon=qta.icon(  # 手动规定icon 手动icon 自定义icon
+                    "fa6s.square-full", "mdi.opacity",
+                    options=[
+                        {"color": f"{NodeCategory.PROCESS.color}"},
+                        {"color": "#00FF00", "scale_factor": 0.8},
+                    ],
+                ),
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(
@@ -314,9 +396,10 @@ class SuperKeyNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "按选定的背景色抠像（颜色键/超级键）：颜色接近背景色的像素变为透明；\n"
-                "边缘处理强弱：0% 硬边二值抠像，100% 大范围柔和过渡（羽化边缘）。\n"
-                "输出图片序列"
+                "选取背景色，把颜色与它相近的像素抠成透明（超级键式）：\n"
+                "背景色：要抠成透明的颜色（点击色块选取）\n"
+                "边缘处理强弱 %：0% 硬边抠像，100% 大范围柔和过渡\n"
+                "输出图片序列（Alpha 只减不增）"
             ),
         )
 
@@ -329,6 +412,64 @@ class SuperKeyNode(SequenceNode):
             cls.sequence(inputs),
             key_color=key_color,
             edge_strength=float(params["edge_strength"]),
+        )
+
+
+
+
+class ColorKeyNode(SequenceNode):
+    """颜色键：按用户选取的背景色抠像，容差/羽化双滑条（PR 颜色键式）。
+
+    处理：backend.color_key_tolerance_sequence(key_color, tolerance, feather)
+    参数：key_color（ColorParam 色块按钮）、tolerance（FloatParam 容差 %）、
+          feather（FloatParam 羽化 %）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    与「超级键」的滤色逻辑区别：键控半径由**容差**决定（50% ≡ 归一化距离
+    0.25，与超级键默认中心一致），**羽化**自容差边界向外过渡——容差内的
+    像素完全键出，不会因羽化而在中心出现半透明（超级键为固定中心 +
+    边缘处理强弱单滑条）。距离度量与超级键同一（RGB 欧氏距离归一化）。
+    """
+
+    NODE_NAME = "颜色键"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "color_key", self.NODE_NAME, NodeCategory.PROCESS,
+                # 与「超级键」同款双层图标（色块底 + 键出色圆点），
+                # 形式与超级键类似（图标一致，靠标题区分）。
+                icon=category_icon(NodeCategory.PROCESS, "mdi.opacity"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    # 背景色由 QColorDialog 选取（ColorParam 色块按钮控件）；
+                    # 默认绿幕色（与「超级键」一致）。
+                    ColorParam("key_color", "背景色", default="#00ff00"),
+                    FloatParam("tolerance", "容差 %", default=50.0, minimum=0, maximum=100),
+                    FloatParam("feather", "羽化 %", default=50.0, minimum=0, maximum=100),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "颜色键：选取背景色，把颜色与它相近的像素抠成透明\n"
+                "容差 %：越大抠得越多（0 = 只抠完全相同的颜色）\n"
+                "羽化 %：越大边缘越虚\n"
+                "输出图片序列"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        # '#rrggbb' → (r, g, b) 三元组（hex 字符串为预设持久化格式）。
+        hex_color = str(params["key_color"])
+        key_color = tuple(int(hex_color[index:index + 2], 16) for index in (1, 3, 5))
+        return backend.color_key_tolerance_sequence(
+            cls.sequence(inputs),
+            key_color=key_color,
+            tolerance=float(params["tolerance"]),
+            feather=float(params["feather"]),
         )
 
 
@@ -358,14 +499,16 @@ class RotateNode(SequenceNode):
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(
-                    FloatParam("angle", "角度", default=0.0, minimum=-180.0, maximum=180.0),
+                    FloatParam("angle", "角度 °", default=0.0, minimum=-180.0, maximum=180.0),
                     BoolParam("inscribe", "内接最大矩形裁剪", default=False),
                 ),
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
                 "输入图片序列\n"
-                "按角度旋转每帧（正角度逆时针）\n"
+                "按角度旋转每帧，旋转空隙用透明像素填充：\n"
+                "角度 °：逆时针为正（0 = 不变）\n"
+                "内接最大矩形裁剪：勾选后把旋转结果裁成内容完整的最小矩形（画布更小、无空隙）\n"
                 "输出图片序列"
             ),
         )
@@ -478,8 +621,8 @@ class AspectRatioNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "按因子非等比缩放帧宽（高度不变）控制纵横比：\n"
-                "1.0 = 不变；小于 1 横向压扁（更窄），大于 1 横向拉宽（更扁）。\n"
+                "非等比缩放帧宽（高度不变）控制纵横比：\n"
+                "挤压程度：1.0 = 不变，小于 1 横向压扁，大于 1 横向拉宽\n"
                 "输出图片序列"
             ),
         )
@@ -488,6 +631,54 @@ class AspectRatioNode(SequenceNode):
     def execute(cls, inputs, params, backend):
         return backend.squeeze_aspect_sequence(
             cls.sequence(inputs), factor=float(params["factor"])
+        )
+
+
+
+class PercentScaleNode(SequenceNode):
+    """百分比缩放：输入序列 → 输出序列，按用户百分比等比缩放每一帧。
+
+    处理：backend.scale_percent_sequence(percent, resample)
+    参数：percent（IntParam 缩放百分比 %，1..1000，默认 100 = 原尺寸）、
+          resample（ChoiceParam 缩放算法，与「分辨率统一」同一来源）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    画面处理（原序列处理分类，随分类重划迁入）：单序列输入、逐帧等比缩放、
+    帧数不变——目标尺寸由本节点自己的百分比决定（新宽高 =
+    round(原尺寸 × percent / 100)），不需要第二路基准序列。
+    """
+
+    NODE_NAME = "百分比缩放"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "percent_scale", self.NODE_NAME, NodeCategory.PROCESS,
+                icon=category_icon(NodeCategory.PROCESS, "mdi.resize"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    IntParam("percent", "缩放百分比 %", default=100, minimum=1, maximum=1000),
+                    # 与「序列相加」「分辨率统一」同一缩放算法来源（单一源头 options.py）。
+                    ChoiceParam("resample", "缩放算法", options=RESAMPLE),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "按设置的百分比等比缩放画面（宽高同比例）：\n"
+                "缩放百分比 %：100 = 不变，小于 100 缩小，大于 100 放大\n"
+                "缩放算法：放大/缩小时的画面重采样方式\n"
+                "输出图片序列（帧数不变）"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        return backend.scale_percent_sequence(
+            cls.sequence(inputs),
+            percent=int(params["percent"]),
+            resample=RESAMPLE.key_of(params["resample"]),
         )
 
 
@@ -517,11 +708,8 @@ class FlipNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "按所选方向翻转每一帧：\n"
-                "水平 = 左右镜像（ImageOps.mirror）\n"
-                "垂直 = 上下翻转（ImageOps.flip）\n"
-                "Alpha 随像素正确翻转；输出尺寸不变\n"
-                "输出图片序列"
+                "按所选方向翻转每一帧（水平 = 左右镜像，垂直 = 上下翻转）\n"
+                "输出图片序列（尺寸不变，Alpha 随像素翻转）"
             ),
         )
 
@@ -578,8 +766,9 @@ class SequenceCropNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "鼠标拖动裁剪画面\n"
-                "输出图片序列"
+                "在原始像素预览上拖拽红色裁剪线，裁剪每一帧：\n"
+                "纵横比：锁定裁剪框比例（可选自由或常用比例）\n"
+                "输出图片序列（输出尺寸 = 裁剪框）"
             ),
         )
 
@@ -625,19 +814,10 @@ class DitherNode(SequenceNode):
                 panel=PanelSpec(scrub_frames=True),
             ),
             help=(
-                "已过时：本节点按 PS「存储为 Web 所用格式」语义设计，"
-                "与 ImageMagick 原生特性差距较大（固定色板/取色方式为手写补丁），"
-                "不建议新工作流使用；请改用「颜色量化」节点"
-                "（IM 原生 -quantize/-colors/-treedepth/-dither/-ordered-dither/-posterize）。"
-                "\n（以下为旧说明，仅存档参考）\n"
-                "输入图片序列\n降低颜色深度并仿色（仿ps但效果欠佳）"
-                "可感知=octree 量化（sRGB）；\n"
-                "随样性=Lab 感知空间量化；\n"
-                "受限(Web)=216 色 web-safe 固定色板；\n"
-                "灰度/黑白=先转灰度再量化（黑白固定 2 色）；\n"
-                "Windows/Mac OS=映射系统色板 PNG\n"
-                "只作用于 RGB，保留 Alpha。\n"
-                "输出图片序列。"
+                "输入图片序列\n"
+                "已过时：请改用「颜色量化（IM）」节点（本节点按旧 PS 语义实现、效果欠佳）\n"
+                "降低颜色深度并仿色（只作用于颜色，Alpha 保留）\n"
+                "输出图片序列"
             ),
         )
 
@@ -703,16 +883,14 @@ class ColorQuantizeNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "按 ImageMagick 原生特性降低颜色数（共享调色板）：\n"
-                "量化色彩空间=-quantize 分桶空间（sRGB 默认；灰度=先转灰度再量化；"
-                "透明=把 Alpha 纳入量化）；\n"
-                "颜色数=-colors（2–256，整条序列共享一个调色板）；\n"
-                "树深度=-treedepth（0=自动）；\n"
-                "仿色=-dither（扩散/无仿色/Riemersma）；\n"
-                "有序仿色=-ordered-dither 预处理（阈值图+均匀色阶，勾选后仿色置灰）；\n"
-                "海报化色阶=-posterize 每通道均匀色阶（0=关闭）。\n"
-                "Alpha：透明空间纳入量化；其余空间保留原 Alpha 精确不变。\n"
-                "输出图片序列。"
+                "把整条序列的颜色统一降到一张调色板（GIF 减色前处理）：\n"
+                "量化色彩空间：颜色比较与分桶使用的色彩空间\n"
+                "颜色数：调色板最大颜色数（2–256）\n"
+                "树深度：0 = 自动\n"
+                "仿色：降低颜色数时的像素抖动方式\n"
+                "有序仿色：勾选后改用阈值图做图案仿色（仿色选项同时置灰）\n"
+                "海报化色阶(0=关)：每通道再均匀分级，0 = 关闭\n"
+                "输出图片序列（Alpha 保留）"
             ),
         )
 

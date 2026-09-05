@@ -149,6 +149,25 @@ SCALE_STRATEGY = ChoiceGroup(
     default="适合",
 )
 
+# 色相/饱和度（选区）节点：编辑目标色域（标签 → 键 → 中心色相度数）。
+# 「全图」= PS 全图(Master)（蒙版恒 1）；红/黄/绿/青/蓝/洋红 = PS 预设色域
+# 中心（0/60/120/180/240/300，色环六等分）；「自定义(取色器)」中心来自
+# 「目标颜色」色块（PS 吸管「把中心色域移到所点颜色」的等效入口，决策 #134）。
+HUE_SAT_TARGET = ChoiceGroup(
+    "hue_sat_target",
+    (
+        ChoiceOption("全图", "master", None),
+        ChoiceOption("自定义(取色器)", "custom", None),
+        ChoiceOption("红色", "red", 0.0),
+        ChoiceOption("黄色", "yellow", 60.0),
+        ChoiceOption("绿色", "green", 120.0),
+        ChoiceOption("青色", "cyan", 180.0),
+        ChoiceOption("蓝色", "blue", 240.0),
+        ChoiceOption("洋红", "magenta", 300.0),
+    ),
+    default="全图",
+)
+
 # 颜色深度节点（已过时，见关键决策 #76）：降低颜色深度算法（PS「存储为
 # Web 所用格式」同款选项；「可选择 Selective」为 Adobe 私有算法，ImageMagick
 # 无等价物，不实现）。该节点基于 PS 语义设计，与 IM 原生特性差距较大，

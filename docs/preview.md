@@ -34,7 +34,9 @@
 - overlay 的源图 = 上游输出序列首帧（未应用本节点裁剪）：`ui.preview_path_for_node`
   按 `panel.takeover_data_sources()` 能力探测（含 `"first_frame"` 时）返回
   `_upstream_first_frame_path`（上游 `SequenceArtifact.frames[0]`，链式语义一致：
-  第二个裁剪的红框画在第一个裁剪的结果上）；无上游时回退自身输出预览。
+  第二个裁剪的红框画在第一个裁剪的结果上；多输出上游（序列剃刀/RGBA 通道分离）
+  按**实际连接的输出端口名**取对应分支首帧——连剃刀「段B」则红框画在段B上，
+  决策 #128）；无上游时回退自身输出预览。
 - **1:1 框跟随图片 + 跨屏重建**：overlay 尺寸 = 素材物理像素 ÷ 当前 DPR，换图/
   跨屏后 `_update_size` 发 `geometry_changed` → 面板 → 节点重排；窗口跨屏时
   `MainWindow._refresh_all_preview_dpr` → `panel.refresh_preview_dpr(dpr)` →
@@ -67,8 +69,10 @@
   只读行显示「切割位置：第 i 帧后（段A 1..i / 段B i+1..N）」。
 - 剃刀条帧 = 上游输出序列产物（未应用本节点切割）：`ui.preview_path_for_node`
   按 `panel.takeover_data_sources()` 能力探测（含 `"sequence_frames"` 时）调用
-  `_upstream_sequence_frames`（上游 `SequenceArtifact` 全帧；上游为多输出节点取
-  首个可显示序列；上游为清单时无帧，胶片条清空显示「无预览」）；无上游时同样清空。
+  `_upstream_sequence_frames`（上游 `SequenceArtifact` 全帧；上游为多输出节点
+  （序列剃刀/RGBA 通道分离）按**实际连接的输出端口名**取对应分支——链式剃刀
+  连「段B」喂段B、连「段A」喂段A，随端口切换刷新，决策 #128 修复「链式剃刀
+  预览固定显示段A」；上游为清单时无帧，胶片条清空显示「无预览」）；无上游时同样清空。
 - **拖拽撤销折叠**：与裁剪节点同款 `MainWindow._param_gesture_*`——整个拖拽
   手势折叠为一条撤销记录；空手势不产生撤销记录。
 

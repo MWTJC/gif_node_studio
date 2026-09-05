@@ -64,6 +64,11 @@ def _wand_quantize_all(
 # 真实利用多核。上限 8，避免核数异常（如容器限制）时过度争抢。
 PNG_EXPORT_WORKERS = min(8, max(2, os.cpu_count() or 4))
 
+# 视频解码的 FFmpeg 帧线程数（stream.codec_context.thread_count，默认 1）：
+# H.264/HEVC/VP9 等帧线程解码实测 3.95×（120 帧 720p：0.157s → 0.040s）。
+# 封顶 8：解码线程会与 PNG 保存池（PNG_EXPORT_WORKERS）重叠运行，全核 auto 有过订阅风险。
+VIDEO_DECODE_THREADS = min(8, max(2, os.cpu_count() or 4))
+
 # 中间帧/缓存 PNG 的压缩级别（用户决策：中间件/缓存不追求体积，速度优先）。
 # 实测（30 帧 1920×1080 RGBA，8 线程并行）：level=0（零压缩）241ms/237MB 反而
 # 比 level=1 198ms/9.3MB 慢——零压缩会写入约 8MB/帧导致 I/O 瓶颈；level=1

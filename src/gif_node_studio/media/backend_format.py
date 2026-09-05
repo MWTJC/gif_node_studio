@@ -11,6 +11,7 @@ from ..core.domain import SequenceArtifact
 from .image_utils import DEFAULT_SEQUENCE_FPS
 from .image_utils import PNG_CACHE_COMPRESS_LEVEL
 from .image_utils import PNG_EXPORT_WORKERS
+from .image_utils import VIDEO_DECODE_THREADS
 from .image_utils import _wand_rgba_bytes
 from .imagemagick import require_wand
 from .media_info import gif_native_fps
@@ -31,6 +32,17 @@ def _drain_save_futures(futures: list[Future]):
     for future in futures:
         future.result()
 
+def _enable_video_threads(stream) -> None:
+    """启用 FFmpeg 帧线程解码（AVCodecContext 默认 thread_count=1）。
+
+    H.264/HEVC/VP9 等支持帧线程的解码器实测 ~4×（120 帧 720p：
+    0.157s → 0.040s）。纯优化：失败/不支持时忽略，不影响解码功能。
+    """
+    try:
+        stream.codec_context.thread_count = VIDEO_DECODE_THREADS
+    except Exception:
+        pass
+
 def _extract_video_frame(workspace, container_or_path, seconds: float):
     """解码视频在 seconds 时刻的帧并物化为 PNG；失败返回 None。"""
     try:
@@ -39,6 +51,7 @@ def _extract_video_frame(workspace, container_or_path, seconds: float):
                 return _extract_video_frame(workspace, container, seconds)
         container = container_or_path
         stream = container.streams.video[0]
+        _enable_video_threads(stream)
         if seconds > 0 and stream.time_base is not None:
             offset = int(seconds * stream.time_base.denominator / stream.time_base.numerator)
             container.seek(offset, stream=stream, backward=True)
@@ -138,6 +151,7 @@ def _format_video(progress, manifest: MediaManifest, output: Path):
     time_mode = manifest.range_mode == "time"
     with av.open(manifest.sources[0]) as container:
         stream = container.streams.video[0]
+        _enable_video_threads(stream)
         fps = float(stream.average_rate or stream.base_rate or DEFAULT_SEQUENCE_FPS)
         duration_s = (
             container.duration / 1_000_000 if getattr(container, "duration", None) else None
@@ -286,6 +300,7 @@ def extract_first_frame(workspace, manifest: MediaManifest):
         return str(target)
     with av.open(manifest.sources[0]) as container:
         stream = container.streams.video[0]
+        _enable_video_threads(stream)
         for frame in container.decode(stream):
             frame.to_image().convert("RGBA").save(target, "PNG")
             return str(target)

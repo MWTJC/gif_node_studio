@@ -40,7 +40,7 @@ from .parameter_panel import ParameterPanel
 from .sequence_nodes import SequenceNode
 
 class IconComposeNode(SequenceNode):
-    """ico合成：把若干单帧序列合成为多尺寸图标序列（ICO 分级）。
+    """ICO 合成：把若干单帧序列合成为多尺寸图标序列（ICO 分级）。
 
     处理：backend.icon_compose + backend.write_ico + MediaManifest 清单输出
     参数：auto_grade（BoolParam 勾选框）
@@ -52,7 +52,7 @@ class IconComposeNode(SequenceNode):
     - 不勾选：按端口顺序原样输出各输入的单帧（手动提供各尺寸）。
     """
 
-    NODE_NAME = "ico合成"
+    NODE_NAME = "ICO 合成"
 
     # 输出类节点框架契约（ui.py 按类属性派生导出按钮分派与固定缓存保留）：
     EXPORT_KIND = "ico"                 # 导出类型（ui.export_node 按此分派）
@@ -86,10 +86,10 @@ class IconComposeNode(SequenceNode):
             ),
             help=(
                 "输入若干图片序列（每个序列必须为单帧）\n"
-                "合成为多尺寸图标序列；\n"
-                "自动分级：取分辨率最高的输入，按常见 icon 分辨率逐级缩小\n"
-                "输出图片序列；\n"
-                "另输出格式化清单（各分辨率帧），供 ico分辨率查看 等分析节点使用"
+                "把多路单帧合成一个多尺寸 ICO：\n"
+                "自动分级：勾选后按常见图标尺寸逐级生成各档；不勾选按端口顺序原样打包\n"
+                "可导出到本地文件\n"
+                "另输出格式化清单（各分辨率帧），供 ICO 分辨率查看 等分析节点使用"
             ),
         )
 
@@ -111,7 +111,7 @@ class IconComposeNode(SequenceNode):
         artifact = backend.icon_compose(inputs, auto_grade=bool(params["auto_grade"]))
         # 固定缓存 .ico（导出按钮把该文件复制到用户选择的路径）。
         ico_path = backend.write_ico(artifact, backend.workspace / cls.CACHE_FILENAME)
-        # 清单输出端口：把各分辨率帧作为清单源（ico分辨率查看 按源逐张 1:1 拼贴）。
+        # 清单输出端口：把各分辨率帧作为清单源（ICO 分辨率查看 按源逐张 1:1 拼贴）。
         manifest = MediaManifest(MediaKind.STATIC_SEQUENCE, tuple(artifact.frames))
         # 输出类节点元数据契约：仅关键信息（可读文件大小）——由本节点的
         # describe_output 覆写直接透出，不再逐端口展开。
@@ -161,11 +161,11 @@ class GifExportNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "合并图片序列为 gif 文件（按输入**原样合成**："
-                "不做帧优化/透明优化，帧间未变化区域全幅存储；"
-                "颜色数/仿色由上游「颜色量化」节点控制）；\n"
-                "可导出到本地文件；\n"
-                "另输出格式化清单（生成的 gif），供 gif优化分析 节点查看存储情况"
+                "把图片序列合成 GIF（按原样合成，颜色数/仿色由上游「颜色量化」节点控制）：\n"
+                "帧速：动画播放帧率\n"
+                "尺寸 %：输出宽高比例\n"
+                "可导出到本地文件\n"
+                "另输出格式化清单（生成的 GIF），供 GIF 优化分析 节点查看存储情况"
             ),
         )
 
@@ -191,7 +191,7 @@ class GifExportNode(SequenceNode):
             fps=float(params["fps"]),
             width_percent=int(params["size_percent"]),
         )
-        # 清单输出端口：携带生成的 gif 文件路径（gif优化分析 按文件结构解码）。
+        # 清单输出端口：携带生成的 gif 文件路径（GIF 优化分析 按文件结构解码）。
         manifest = MediaManifest(MediaKind.ANIMATED_IMAGE, (str(path),))
         # 输出类节点元数据契约：仅关键信息（可读文件大小）——由本节点的
         # describe_output 覆写直接透出。
@@ -243,7 +243,7 @@ class GifExportFfmpegNode(SequenceNode):
                     ChoiceParam("dither", "仿色", options=FFMPEG_DITHER),
                     IntParam("bayer_scale", "Bayer 粒度", default=5, minimum=0, maximum=5,
                              enabled_when=("dither", ("Bayer(有序)",))),
-                    BoolParam("diff_mode", "帧优化(diff_mode=rectangle)", default=True),
+                    BoolParam("diff_mode", "帧优化", default=True),
                     # 纯显示选项（与「GIF 合成」节点一致）：勾选后预览框改用
                     # 绿幕/品红色，便于观察透明通道，不触发运行。
                     BoolParam("transparent_preview", "透明预览", default=False),
@@ -252,18 +252,15 @@ class GifExportFfmpegNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "FFmpeg(PyAV)：\n"
-                "palettegen->paletteuse\n"
-                "颜色数=palettegen max_colors 3–256\n"
-                "仿色=Floyd-Steinberg(默认)/无/none/\n"
-                "Atkinson/Sierra2-4A/Bayer(录屏)/Heckbert；\n"
-                "Bayer 粒度=0–5（仅 Bayer 生效）；\n"
-                "帧优化=diff_mode=rectangle，编码时直接只存变化区域\n"
-                "Floyd-Steinberg/Atkinson/Sierra2-4A 为误差扩散仿色\n"
-                "录屏冻结工作流建议配合「帧差静止保持」+无仿色；\n"
-                "透明输入按 GIF 1-bit 透明语义保留（半透明像素二值化）；\n"
-                "可导出到本地文件；\n"
-                "另输出格式化清单（生成的 gif），供 gif优化分析 节点查看存储情况"
+                "用 FFmpeg 管线合成 GIF（整段共享调色板，编码时直接做帧优化）：\n"
+                "帧速：动画播放帧率；尺寸 %：输出宽高比例\n"
+                "颜色数：调色板大小（3–256）\n"
+                "调色板统计：调色板的统计口径（整段/帧间/单帧）\n"
+                "仿色：映射调色板时的像素抖动方式\n"
+                "Bayer 粒度：仅有序仿色生效的抖动粒度\n"
+                "帧优化：编码时只存变化区域（体积更小）\n"
+                "透明输入按 GIF 透明语义保留（半透明像素二值化）\n"
+                "可导出到本地文件；另输出格式化清单（生成的 GIF）"
             ),
         )
 
@@ -359,18 +356,17 @@ class GifExportGifskiNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "gifski编码\n"
-                "运动质量：越小越拖影\n"
-                "有损质量：越小越损\n"
-                "尺寸限制：像素，0=不限制\n"
-                "速度档：标准/快速(时间-50%)/精细(时间+50%)；\n"
-                "循环：-1=不循环 0=无限 N=重复N次；\n"
-                "往复：动画正放后接倒放\n"
-                "固定色：调色板恒保留该色（勾选启用后生效）\n"
-                "合成底色：半透明像素的合成背景（勾选启用后生效）；\n"
-                "透明输入按 GIF 1-bit 透明语义保留；\n"
-                "可导出到本地文件；\n"
-                "另输出格式化清单（生成的 gif），供 gif优化分析 节点查看存储情况"
+                "用 gifski 合成 GIF（每帧独立调色板，单帧画质高，适合照片/渐变素材）：\n"
+                "帧速：动画播放帧率\n"
+                "总体质量/运动质量/有损质量：质量三轴（低值分别更粗糙/更多拖影/更多损失）\n"
+                "宽度限制/高度限制：输出最大宽高（0 = 不限制）\n"
+                "速度档：编码速度档位\n"
+                "循环次数：-1 = 不循环，0 = 无限，正数 = 重复 N 次\n"
+                "往复：正放后接倒放\n"
+                "固定色：调色板恒保留的颜色（勾选启用）\n"
+                "合成底色：半透明像素合成的底色（勾选启用）\n"
+                "透明输入按 GIF 透明语义保留（半透明像素二值化）\n"
+                "可导出到本地文件；另输出格式化清单（生成的 GIF）"
             ),
         )
 
@@ -467,20 +463,19 @@ class GifOptimizeNode(StudioNode):
                                 enabled_when=("recolor", (True,))),
                     PaletteFileParam("colormap_file", "色板文件",
                                      enabled_when=("colormap", ("自定义文件",))),
-                    BoolParam("careful", "兼容模式(--careful)", default=False),
+                    BoolParam("careful", "兼容模式", default=False),
                 ),
                 panel=PanelSpec(export_enabled=True, preview_1to1=True),
             ),
             help=(
-                "输入格式化清单\n"
-                "用 gifsicle 做 GIF 文件级优化：\n"
-                "优化级别=-O1（只存变化区域）/-O2（另做透明优化）/-O3（多策略择优，默认）；\n"
-                "有损度=--lossy 0–200（0=关闭；数值越大体积越小、伪影越明显）；\n"
-                "GIF 级降色=--colors+--color-method 对 GIF 再降色\n"
-                "配合仿色（--dither：Floyd-Steinberg/Atkinson/ro64/o3/o4/o8/有序）与\n"
-                "固定色板（--use-colormap：web 216 色/灰度/黑白/自定义文本色板或 GIF 色表）；\n"
-                "兼容模式=--careful\n"
-                "输出格式化清单（优化后的 GIF），可导出到本地文件；\n"
+                "输入格式化清单（GIF 文件）\n"
+                "用 gifsicle 做 GIF 文件级优化（体积优先）：\n"
+                "优化级别：帧优化的强度档位\n"
+                "有损度(0=关)：有损压缩程度（越大体积越小、伪影越多）\n"
+                "GIF 级降色：勾选后启用 GIF 再降色与固定色板相关参数\n"
+                "颜色数/取色方法/仿色/固定色板：GIF 级降色的参数（可配合色板文件）\n"
+                "兼容模式：兼容老播放器的保守编码\n"
+                "输出优化后的格式化清单，可导出到本地文件"
             ),
         )
 
@@ -553,7 +548,10 @@ class PngExportNode(SequenceNode):
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 panel=PanelSpec(export_enabled=True),
             ),
-            help="输入图片序列\n把上游 RGBA PNG 序列输出到所选文件夹。",
+            help=(
+                "输入图片序列\n"
+                "把上游 RGBA PNG 帧输出到所选文件夹（「导出…」弹框保存）"
+            ),
         )
 
     # 不覆写 describe_output：PNG 导出返回文件元组（非 MultiOutput），
@@ -610,15 +608,12 @@ class WebpExportNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "导出 WebP 动画（Pillow 内建编码，零新依赖）：\n"
-                "质量=0–100（无损编码勾选时忽略，改用无损模式）；\n"
-                "无损编码=WebP 无损压缩（体积更大、画质无损）；\n"
-                "序列含透明时**自动使用无损编码**（Pillow WebP 动画有损路径\n"
-                "丢失 alpha，见 Pillow #8101 同类缺陷）；\n"
-                "帧速=帧/秒（导出动画时长基准）；尺寸%=输出宽高比例；\n"
-                "无限循环播放。\n"
-                "运行写缓存 preview.webp，「导出…」弹框保存（默认 output.webp）；\n"
-                "输出图片序列（原样透传）"
+                "导出 WebP 动画（透明全保留，体积通常远小于 GIF）：\n"
+                "帧速：动画播放帧率；尺寸 %：输出宽高比例\n"
+                "质量：有损画质（0–100）\n"
+                "无损编码：勾选后无损压缩（体积更大、画质无损）\n"
+                "序列含透明时自动使用无损编码\n"
+                "可导出到本地文件（「导出…」弹框）；输出图片序列（原样透传）"
             ),
         )
 
@@ -691,10 +686,9 @@ class ApngExportNode(SequenceNode):
             ),
             help=(
                 "输入图片序列\n"
-                "导出 APNG 动画（Pillow）：\n"
-                "APNG 为无损格式（PNG 帧 + acTL 动画块），alpha 全保留；\n"
-                "帧速=帧/秒；尺寸%=输出宽高比例；无限循环播放。\n"
-                "输出图片序列（原样透传）"
+                "导出 APNG 动画（无损格式，alpha 全保留）：\n"
+                "帧速：动画播放帧率；尺寸 %：输出宽高比例\n"
+                "可导出到本地文件（「导出…」弹框）；输出图片序列（原样透传）"
             ),
         )
 

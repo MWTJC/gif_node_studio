@@ -106,8 +106,19 @@ class MediaBackend:
         return backend_format._drain_save_futures(futures)
 
     # ===== 区段 2（转发至 backend_color，决策 #120） =====
-    def adjust_color(self, artifact: SequenceArtifact, brightness: float=0, saturation: float=0, hue: float=0):
-        return backend_color.adjust_color(self.workspace, self._progress, artifact, brightness, saturation, hue)
+    def adjust_color(self, artifact: SequenceArtifact, brightness: float=0, saturation: float=0):
+        return backend_color.adjust_color(self.workspace, self._progress, artifact, brightness, saturation)
+
+    def hue_sat_range_sequence(self, artifact: SequenceArtifact, *, center_hue: float | None = None,
+                               hue_delta: float = 0.0, sat_delta: float = 0.0,
+                               light_delta: float = 0.0, range_half: float = 15.0,
+                               feather_deg: float = 30.0):
+        """PS 色相/饱和度（选区/全图，序列 → 序列）转发（决策 #134）。"""
+        return backend_color.hue_sat_range_sequence(
+            self.workspace, self._progress, artifact,
+            center_hue=center_hue, hue_delta=hue_delta, sat_delta=sat_delta,
+            light_delta=light_delta, range_half=range_half, feather_deg=feather_deg,
+        )
 
     def binarize_sequence(self, artifact: SequenceArtifact, threshold: int):
         return backend_color.binarize_sequence(self.workspace, self._progress, artifact, threshold)
@@ -127,6 +138,9 @@ class MediaBackend:
     def color_key_sequence(self, artifact: SequenceArtifact, key_color: tuple[int, int, int], edge_strength: float):
         return backend_color.color_key_sequence(self.workspace, self._progress, artifact, key_color, edge_strength)
 
+    def color_key_tolerance_sequence(self, artifact: SequenceArtifact, key_color: tuple[int, int, int], tolerance: float = 50.0, feather: float = 50.0):
+        return backend_color.color_key_tolerance_sequence(self.workspace, self._progress, artifact, key_color, tolerance, feather)
+
     # ===== 区段 3（转发至 backend_sequence，决策 #120） =====
     def rewind_sequence(self, artifact: SequenceArtifact):
         return backend_sequence.rewind_sequence(self.workspace, self._progress, artifact)
@@ -139,6 +153,9 @@ class MediaBackend:
 
     def align_resolution(self, a: SequenceArtifact, b: SequenceArtifact, *, resample: str='lanczos', strategy: str='fit'):
         return backend_sequence.align_resolution(self.workspace, self._progress, a, b, resample=resample, strategy=strategy)
+
+    def scale_percent_sequence(self, artifact: SequenceArtifact, *, percent: int = 100, resample: str = 'lanczos'):
+        return backend_sequence.scale_percent_sequence(self.workspace, self._progress, artifact, percent=percent, resample=resample)
 
     def overlay_sequences(self, a: SequenceArtifact, b: SequenceArtifact, *, resample: str='lanczos', strategy: str='fit'):
         return backend_sequence.overlay_sequences(self.workspace, self._progress, a, b, resample=resample, strategy=strategy)

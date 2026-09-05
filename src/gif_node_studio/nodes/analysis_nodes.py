@@ -20,7 +20,7 @@ from .node_base import StudioNode
 from .parameter_panel import ParameterPanel
 
 class PaletteViewNode(StudioNode):
-    """gif调色板查看：分析类节点，可接清单或序列，无输出。
+    """GIF 调色板查看：分析类节点，可接清单或序列，无输出。
 
     处理：
     - GIF 清单（ANIMATED_IMAGE）：逐帧**生效色表**（局部色表优先/全局色表
@@ -30,7 +30,7 @@ class PaletteViewNode(StudioNode):
     组件：帧滑条 + 1:1 预览（PanelSpec.scrub_frames, preview_1to1）
     """
 
-    NODE_NAME = "gif调色板查看"
+    NODE_NAME = "GIF 调色板查看"
 
     def __init__(self):
         super().__init__(
@@ -45,10 +45,8 @@ class PaletteViewNode(StudioNode):
             ),
             help=(
                 "输入图片序列/格式化清单\n"
-                "GIF：逐帧查看每帧色表（帧滑条；每帧局部色表优先，否则全局色表），"
-                "色块图=固定 16×16（每帧 ≤256 色天然适配）；\n"
-                "序列：整序列像素统计（>256 色报错不支持）；\n"
-                "色板图为固定 16×16 色块（缺色格透明），预览框按原始像素 1:1 显示；"
+                "查看调色板：GIF 按帧滑条逐帧查看每帧用到的颜色；普通序列统计整段颜色\n"
+                "输出色板图（预览框按原始像素 1:1 显示）"
             ),
         )
 
@@ -94,8 +92,8 @@ class ResolutionViewNode(StudioNode):
             ),
             help=(
                 "输入图片序列/格式化清单\n"
-                "完全按素材原始像素尺寸 1:1 显示，不缩放、不裁剪。\n"
-                "便于观察序列的透明通道。"
+                "按素材原始像素 1:1 显示，不缩放不裁剪（便于检查细节与透明通道）\n"
+                "透明背景：勾选后透明区域以棋盘格/绿幕底纹显示"
             ),
         )
 
@@ -139,7 +137,7 @@ class ResolutionViewNode(StudioNode):
 
 
 class GifAnalysisNode(StudioNode):
-    """gif优化分析：分析类节点，特殊解码——按文件实际存储结构逐帧查看
+    """GIF 优化分析：分析类节点，特殊解码——按文件实际存储结构逐帧查看
     透明优化/帧优化的实际情况（与普通播放器的 coalesce 合成结果不同）。
 
     处理：backend.analysis_gif_frames(mode=stored/coalesced) → AnalysisResult
@@ -148,7 +146,7 @@ class GifAnalysisNode(StudioNode):
           （PanelSpec.scrub_frames, preview_1to1, preview_bg_param）
     """
 
-    NODE_NAME = "gif优化分析"
+    NODE_NAME = "GIF 优化分析"
 
     def __init__(self):
         super().__init__(
@@ -174,11 +172,9 @@ class GifAnalysisNode(StudioNode):
             ),
             help=(
                 "输入格式化清单（GIF 文件）\n"
-                "特殊解码：按文件实际存储结构逐帧 1:1 查看，\n"
-                "直观呈现 gif 在帧优化（局部帧仅存变化区域）与\n"
-                "透明优化（帧间未变化像素置透明）方面的实际情况；\n"
-                "解码方式：存储帧=按文件实际存储（默认），合成帧=coalesce 完整帧供对照；\n"
-                "透明背景：勾选后预览框改用绿幕/品红或棋盘格底纹，便于观察透明像素。"
+                "按文件实际存储逐帧查看 GIF 的帧优化/透明优化情况（帧滑条 1:1）：\n"
+                "解码方式：存储帧 = 按文件实际存储（默认）；合成帧 = 完整合成帧对照\n"
+                "透明背景：勾选后透明区域以棋盘格/绿幕底纹显示"
             ),
         )
 
@@ -186,7 +182,7 @@ class GifAnalysisNode(StudioNode):
     def execute(cls, inputs, params, backend):
         manifest = cls.require_input(inputs)
         if not isinstance(manifest, MediaManifest):
-            raise ValueError("gif优化分析：输入必须是格式化清单")
+            raise ValueError("GIF 优化分析：输入必须是格式化清单")
         mode = "coalesced" if params.get("view_mode") == "合成帧" else "stored"
         path, frames, metadata = backend.analysis_gif_frames(manifest, mode=mode)
         return AnalysisResult(path, metadata, frames=frames)
@@ -195,7 +191,7 @@ class GifAnalysisNode(StudioNode):
 
 
 class IcoAnalysisNode(StudioNode):
-    """ico分辨率查看：分析类节点，把清单携带的各分辨率帧合成为 1:1 拼贴图，
+    """ICO 分辨率查看：分析类节点，把清单携带的各分辨率帧合成为 1:1 拼贴图，
     在预览窗口显示此 ico 包含的所有分辨率的内容。
 
     处理：backend.analysis_ico_montage → AnalysisResult
@@ -203,7 +199,7 @@ class IcoAnalysisNode(StudioNode):
     组件：1:1 预览 + 透明背景显示（PanelSpec.preview_1to1, preview_bg_param）
     """
 
-    NODE_NAME = "ico分辨率查看"
+    NODE_NAME = "ICO 分辨率查看"
     str_ico_center = -0.12
     def __init__(self):
         super().__init__(
@@ -228,9 +224,9 @@ class IcoAnalysisNode(StudioNode):
                 panel=PanelSpec(preview_1to1=True, preview_bg_param="transparent_bg"),
             ),
             help=(
-                "输入格式化清单（ico 合成输出的各分辨率帧）\n"
-                "在预览窗口 1:1 显示此 ico 包含的所有分辨率的内容（拼贴图，不缩放），\n"
-                "透明区域透出棋盘格底纹；元数据列出各分辨率。"
+                "输入格式化清单（ICO 合成输出的各分辨率帧）\n"
+                "把图标包含的所有分辨率按原始像素拼贴显示（不缩放），透明区域棋盘格底纹\n"
+                "元数据列出各分辨率"
             ),
         )
 
@@ -238,6 +234,6 @@ class IcoAnalysisNode(StudioNode):
     def execute(cls, inputs, params, backend):
         manifest = cls.require_input(inputs)
         if not isinstance(manifest, MediaManifest):
-            raise ValueError("ico分辨率查看：输入必须是格式化清单")
+            raise ValueError("ICO 分辨率查看：输入必须是格式化清单")
         path, metadata = backend.analysis_ico_montage(manifest)
         return AnalysisResult(path, metadata)

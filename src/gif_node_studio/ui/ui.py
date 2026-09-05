@@ -200,6 +200,53 @@ def _feed_sequence_frames(panel, result) -> None:
 
 
 
+def _resolve_port_preview(data, output_port) -> Any:
+    """多输出上游的预览取值：按**实际连接的上游输出端口名**解析（与执行
+    ``_execute_step`` 同源——``produced + port_name → MultiOutput.ports[port_name]``）。
+
+    修复（决策 #128）：胶片条/裁剪框接管的「上游源图」此前取 ``MultiOutput``
+    「首个通道」，导致链式剃刀（连段B仍显示段A）、RGBA 通道分离链（连 G 仍
+    显示 R）的预览与实际执行喂给 ``execute`` 的输入不一致——本函数让预览
+    取数镜像执行取数，两个取数路径不再分叉。
+
+    - 非 ``MultiOutput``（单输出节点）：原样返回；
+    - ``MultiOutput`` 且端口名已知：返回 ``ports[port_name]``（分支缺失返回
+      ``None``——预览宁可不显示，也不显示错误分支）；
+    - 端口名为空（理论不发生）：返回 ``None``。
+    """
+    if isinstance(data, MultiOutput):
+        name = output_port.name() if output_port is not None else ""
+        return data.ports.get(name) if name else None
+    return data
+
+
+def cache_usage_warning_text(usage_bytes: int, limit_bytes: int) -> str:
+    """缓存用量超过设定上限的纯文本状态栏警告（决策 #130）。
+
+    纯文本约束（用户需求）：不使用 emoji/特殊符号——特殊字符会让带该文本的
+    常驻状态栏控件在软件初始化时 addPermanentWidget 变慢，且警告文案应保持
+    干净可读。超过上限 = 现有自动清理（enforce_cache_limit，0.8×上限触发）
+    已尽力（每节点最新结果受保护）仍无法把总量压回上限以内，用户需要知情。
+    """
+    usage = format_bytes(max(0, usage_bytes))
+    limit = format_bytes(max(0, limit_bytes))
+    return f"缓存用量 {usage} 已超过设定上限 {limit}，请清理缓存或调高设置中的缓存上限"
+
+
+def post_run_cache_message(note: str | None, usage_bytes: int | None, limit_bytes: int | None) -> str | None:
+    """节点运行完成后的缓存状态栏消息决策（决策 #130）。
+
+    - 已统计到用量且超过设定上限 → 纯文本警告（优先于清理提示——此时自动
+      清理已尽力仍压不回上限，用户需要知情）；
+    - 未超限但本次发生过自动淘汰（note 非空）→ 原清理提示；
+    - 否则 None（不打扰，维持「节点运行完成」消息）。
+    """
+    if limit_bytes is not None and usage_bytes is not None and usage_bytes > limit_bytes:
+        return cache_usage_warning_text(usage_bytes, limit_bytes)
+    return note
+
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 自动模式全局执行限频：每秒最多 3 次（防止拖动参数时频繁重算）。
     AUTO_MIN_INTERVAL = 1.0 / 3.0
@@ -265,6 +312,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker = AsyncExecutionWorker(self); self.active_request = None; self.active_revisions = {}; self.operation_elapsed = {}; self.auto_mode = False
         # 缓存超限淘汰提示：工作线程写入（_execute_step），UI 线程在运行完成时显示并清空。
         self._cache_eviction_note = None
+        # 自动保存（决策 #131）：间隔由设置指定（分钟，0=关闭）；仅当方案有未保存
+        # 更改时落盘到设置文件旁的 autosave.json；正式保存/正常退出清理该文件，
+        # 异常退出残留 → 下次启动弹窗提示恢复（app.py 生产路径调用 prompt_autosave_restore）。
+        self._autosave_timer = QtCore.QTimer(self)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        self._apply_autosave_settings()
         self._auto_pending: list[StudioNode] = []
         self._auto_last_run = 0.0
         self._auto_timer = QtCore.QTimer(self)
@@ -378,6 +431,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_dirty and not self._confirm_unsaved_changes("关闭"):
             event.ignore()
             return
+        # 正常退出：清理自动保存文件（决策 #131）——正式关闭意味着不再需要
+        # 崩溃恢复副本；若此处异常退出/强杀进程，文件残留 → 下次启动提示恢复。
+        self._remove_autosave()
         session_path = self._session_path
         # 若方案文件恰好落在缓存工作目录内，清理前先暂挪到系统临时目录、
         # 清理后还原——避免 clear_workspace 把用户刚保存的方案当缓存删掉。
@@ -925,6 +981,8 @@ class MainWindow(QtWidgets.QMainWindow):
         node.panel.export_requested.connect(lambda n=node: self.export_node(n))
         # 注入透明背景色（1:1 查看节点「透明背景」勾选后使用；其余节点无该参数则无效果）。
         node.panel.set_preview_bg_color(self._alpha_bg_color())
+        # 注入设置管理器：文件选择行（FilePathWidget）读/写「上次导入目录」记忆。
+        node.panel.settings = self.settings
 
 
     def _on_selected(self, node):
@@ -1139,6 +1197,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 透明背景色变更 → 应用到所有 1:1 查看节点面板（刷新预览框背景）。
         dialog.alpha_bg_changed.connect(self._apply_alpha_bg_color)
         dialog.exec()
+        # 自动保存间隔可能在对话框内被修改/重置：按新设置重启定时器。
+        self._apply_autosave_settings()
 
 
     def _alpha_bg_color(self) -> str:
@@ -1670,11 +1730,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.active_request = None; self.active_revisions = {}; self.statusBar().showMessage("节点运行完成")
         # 运行成功 = 软件恢复响应：隐藏不稳定警告（若此前 faulthandler 触发过）。
         self._unstable_warning.hide()
-        # 本次运行发生过缓存超限淘汰：附带提示（读完即清空，避免残留到下轮）。
+        # 运行后统计缓存用量（决策 #130）：超过设定上限（缓存/limit_mb）→ 状态栏
+        # 纯文本警告（自动清理已尽力仍压不回上限时用户知情）；若本次运行发生过
+        # 自动淘汰，且总量已回到上限以内，则显示清理提示。警告读完即清空。
         note = getattr(self, "_cache_eviction_note", None)
-        if note:
-            self._cache_eviction_note = None
-            self.statusBar().showMessage(note)
+        self._cache_eviction_note = None
+        limit_bytes = getattr(self, "_active_cache_limit_bytes", None)
+        usage_bytes = self.backend.total_cache_size() if limit_bytes is not None else None
+        message = post_run_cache_message(note, usage_bytes, limit_bytes)
+        if message:
+            self.statusBar().showMessage(message)
         self.stop_action.setEnabled(False)
         self._hide_progress()
 
@@ -1747,6 +1812,21 @@ class MainWindow(QtWidgets.QMainWindow):
         # 固定缓存文件/目录名由节点类声明（CACHE_FILENAME），唯一源头在节点。
         return self.backend.for_node(node.id).workspace / type(node).CACHE_FILENAME
 
+    # --- 导出保存框起始目录记忆（决策 #133）：导出按钮当前无路径参数，
+    # QFileDialog 默认落在程序当前目录；记住上次导出目录后每次从用户最后
+    # 保存处开始（设置键 dialog/export_dir，界面不可见） ---
+
+    def _export_dialog_default(self, default_name: str) -> str:
+        """导出保存框默认位置：上次导出目录 + 默认文件名；无记忆/目录已失效
+        回落纯文件名（对话框落在程序当前目录，等同旧行为）。"""
+        last = self.settings.last_export_dir()
+        return str(Path(last) / default_name) if last else default_name
+
+    def _remember_export_dir(self, path: str) -> None:
+        """用户选定导出目标后记忆其所在目录（取消/空路径不记）。"""
+        if path:
+            self.settings.set_last_export_dir(str(Path(path).parent))
+
 
     def preview_path_for_node(self, node):
         # 接管组件（TakeoverParam，决策 #109）：按面板声明的数据源需求分发，
@@ -1792,15 +1872,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _upstream_first_frame_path(self, node):
         """裁剪框类接管的源图：上游输出（未应用本节点裁剪）的首帧路径。
 
-        链式裁剪时上游也是裁剪节点，其输出序列首帧已是「被上游裁过」的图，
-        与链式语义一致（本节点的红框画在上游结果上）。上游输出可能是：
+        多输出上游（序列剃刀/RGBA 通道分离）按**实际连接的输出端口名**取
+        对应分支的首帧（与执行 ``_execute_step`` 同源，决策 #128）；链式
+        裁剪时上游输出序列首帧已是「被上游处理过」的图，与链式语义一致
+        （本节点的红框画在上游结果上）。上游输出可能是：
         - 序列产物（``SequenceArtifact``）→ 取首帧（新序列级裁剪的常规上游）；
         - 清单（``MediaManifest``）→ 取携带的预览图（旧存档/清单级上游兜底）。
         """
         for input_port in node.input_ports():
             for output_port in input_port.connected_ports():
                 upstream = output_port.node()
-                data = upstream.preview_output or upstream.output_data
+                data = _resolve_port_preview(
+                    upstream.preview_output or upstream.output_data, output_port
+                )
                 if isinstance(data, SequenceArtifact) and data.frames:
                     return Path(data.frames[0])
                 if isinstance(data, MediaManifest) and data.preview:
@@ -1810,20 +1894,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _upstream_sequence_frames(self, node):
         """胶片条类接管的源序列：上游输出序列产物（未应用本节点切割）。
 
-        链式剃刀时上游也是剃刀节点，其输出为多输出（段A/段B），取首个可显示
-        序列（与预览优先级一致）；上游为清单（未格式化）时无帧可显示，返回
-        None（胶片条清空显示「无预览」）。
+        多输出上游按**实际连接的输出端口名**取值——序列剃刀链：连「段A」
+        喂段A、连「段B」喂段B；RGBA 通道分离链同理（与执行喂给 ``execute``
+        的输入一致，决策 #128；修复「链式剃刀预览固定显示段A」）；上游为
+        清单（未格式化）时无帧可显示，返回 None（胶片条清空显示「无预览」）。
         """
         for input_port in node.input_ports():
             for output_port in input_port.connected_ports():
                 upstream = output_port.node()
-                data = upstream.preview_output or upstream.output_data
+                data = _resolve_port_preview(
+                    upstream.preview_output or upstream.output_data, output_port
+                )
                 if isinstance(data, SequenceArtifact) and data.frames:
                     return data
-                if isinstance(data, MultiOutput):
-                    first = next(iter(data.ports.values()), None)
-                    if isinstance(first, SequenceArtifact) and first.frames:
-                        return first
                 if isinstance(data, MediaManifest) and data.preview:
                     return None  # 未格式化：无帧可显示（不取清单预览单帧）
         return None
@@ -1836,9 +1919,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker.busy:
             self.statusBar().showMessage("已有任务运行中")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(None, "导出 GIF", "output.gif", "GIF (*.gif)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            None, "导出 GIF", self._export_dialog_default("output.gif"), "GIF (*.gif)"
+        )
         if not path:
             return
+        self._remember_export_dir(path)
         preview = self.preview_export_path(node)
         if node.dirty or not preview.exists():
             logger.info("导出跳过（GIF，节点 {}）：缓存未生成", node.definition.title)
@@ -1871,9 +1957,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker.busy:
             self.statusBar().showMessage("已有任务运行中")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(None, title, default_name, file_filter)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            None, title, self._export_dialog_default(default_name), file_filter
+        )
         if not path:
             return
+        self._remember_export_dir(path)
         preview = self.preview_export_path(node)
         if node.dirty or not preview.exists():
             logger.info("导出跳过（{}，节点 {}）：缓存未生成", title, node.definition.title)
@@ -1905,9 +1994,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker.busy:
             self.statusBar().showMessage("已有任务运行中")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(None, "导出 ICO", "output.ico", "图标 (*.ico)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            None, "导出 ICO", self._export_dialog_default("output.ico"), "图标 (*.ico)"
+        )
         if not path:
             return
+        self._remember_export_dir(path)
         preview = self.preview_export_path(node)
         if node.dirty or not preview.exists():
             logger.info("导出跳过（ICO，节点 {}）：缓存未生成", node.definition.title)
@@ -1928,10 +2020,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("已有任务运行中")
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            None, "导出 PNG 序列", f"{PNG_EXPORT_DEFAULT_PREFIX}.png", "PNG (*.png)"
+            None, "导出 PNG 序列",
+            self._export_dialog_default(f"{PNG_EXPORT_DEFAULT_PREFIX}.png"),
+            "PNG (*.png)",
         )
         if not path:
             return
+        self._remember_export_dir(path)
         target = Path(path)
         prefix = target.name
         if prefix.lower().endswith(".png"):
@@ -2081,6 +2176,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_path = None
         self._clean_undo_pos = None
         self.statusBar().showMessage("方案已清空")
+        # 清空 = 用户主动放弃画布内容：旧自动保存副本一并清理。
+        self._remove_autosave()
         logger.info("清空方案（移除 {} 个节点）", len(nodes))
 
 
@@ -2120,10 +2217,126 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_path = Path(path)
         stack = self.graph.undo_stack()
         self._clean_undo_pos = (stack.count(), stack.index())
+        # 已保存到正式文件：本次会话的自动保存副本不再需要（避免下次启动误弹恢复）。
+        self._remove_autosave()
         # 已保存 = 用户完成数据保全，隐藏不稳定警告。
         self._unstable_warning.hide()
         self.statusBar().showMessage(f"已保存：{path}")
         logger.info("保存方案：{}", path)
+
+
+    # --- 自动保存（决策 #131）：间隔由设置指定（分钟，0=关闭）；脏时落盘；正常退出清理；启动恢复 ---
+
+    def _apply_autosave_settings(self) -> None:
+        """按设置中的自动保存间隔（分钟，0=关闭）启动/停止定时器。"""
+        minutes = self.settings.autosave_interval_min()
+        if minutes > 0:
+            self._autosave_timer.start(minutes * 60 * 1000)
+        else:
+            self._autosave_timer.stop()
+
+    def _autosave_tick(self) -> None:
+        """自动保存定时器触发：仅当方案有未保存更改时写盘。
+
+        空画布恒为干净（决策 #85）→ 不写；运行中/有模态框时跳过本次
+        （写 JSON 安全，但避免在用户批量操作画布时插入序列化占用主线程）。
+        """
+        if not self._session_dirty:
+            return
+        if self.worker.busy or QtWidgets.QApplication.activeModalWidget() is not None:
+            return
+        self._write_autosave()
+
+    def _write_autosave(self) -> None:
+        """把当前方案落盘到自动保存文件（与正式存档同格式 save_session_clean）。"""
+        path = self.settings.autosave_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            save_session_clean(self.graph, path)
+            logger.info("自动保存方案：{}", path)
+        except OSError as exc:
+            logger.warning("自动保存失败 {}：{}", path, exc)
+
+    def _remove_autosave(self) -> None:
+        """删除自动保存文件（正式保存/读取/清空/正常退出/恢复后调用；失败不阻断）。"""
+        path = self.settings.autosave_path()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("清理自动保存失败 {}：{}", path, exc)
+
+    def prompt_autosave_restore(self) -> bool:
+        """启动时提示恢复上次异常退出残留的自动保存方案（无残留则直接返回）。
+
+        弹窗按钮：恢复（载入自动保存内容，视为未保存的新文档）/ 不恢复
+        （删除自动保存文件）。返回是否执行了恢复。
+        """
+        path = self.settings.autosave_path()
+        if not path.is_file():
+            return False
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)) if mtime else "未知时间"
+        ret = QtWidgets.QMessageBox.question(
+            self,
+            "自动保存恢复",
+            f"检测到上次运行异常退出时自动保存的方案（保存时间 {stamp}）。\n\n"
+            "是否恢复该方案？\n选择「不恢复」将删除自动保存文件。",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+        if ret != QtWidgets.QMessageBox.StandardButton.Yes:
+            self._remove_autosave()
+            return False
+        return self._load_autosave(path)
+
+    def _load_autosave(self, path: Path) -> bool:
+        """把自动保存文件载入画布（启动时画布为空；载入内容 = 未保存草稿）。
+
+        与 load_preset 相同的旧存档兼容清洗/绑定流程，但不弹文件框、不要求
+        先确认；恢复内容没有对应的正式文件 → ``_session_path``/``_clean_undo_pos``
+        置 None（视为从未保存，之后关闭/清空仍会提示保存）。
+        """
+        data, report = self._read_session_compat(str(path))
+        if data is None:
+            return False
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            old_nodes = [node for node in self.graph.all_nodes() if isinstance(node, StudioNode)]
+            release_previews(old_nodes)
+            for node in old_nodes:
+                self.backend.for_node(node.id).clear_cache()
+                self.panels.pop(node.id, None)
+            try:
+                self.graph.deserialize_session(data, clear_session=True, clear_undo_stack=True)
+                recolor_all_pipes(self.graph)
+            except Exception as exc:
+                logger.exception("恢复自动保存失败: %s", path)
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "无法恢复自动保存",
+                    f"恢复 {path} 失败：{exc}\n\n自动保存文件已保留，可手动读取该文件。",
+                )
+                return False
+            for node in self.graph.all_nodes():
+                if isinstance(node, StudioNode):
+                    self._bind_node(node)
+                    node.params = {k: node.get_property(k) for k in node.params}
+                    node.panel.set_values(node.params)
+                    node.output_data = None
+                    node.preview_output = None
+                    node.output_metadata = {}
+                    node.dirty = True
+                    node.set_status("dirty")
+            self._session_path = None
+            self._clean_undo_pos = None
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._remove_autosave()
+        self._show_load_report(report, "已恢复自动保存的方案（请及时另存为）")
+        return True
 
 
     def load_preset(self, *_args):
@@ -2192,6 +2405,8 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._show_load_report(report, f"已读取：{path}")
+        # 读取正式方案 = 画布内容已被文件内容取代：清理自动保存副本。
+        self._remove_autosave()
         logger.info("读取方案：{}（{} 个节点）", path, bound)
 
 
