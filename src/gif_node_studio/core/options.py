@@ -466,3 +466,115 @@ FFMPEG_DITHER = ChoiceGroup(
     ),
     default="Floyd-Steinberg",
 )
+
+# ---------------------------------------------------------------------------
+# 空间域清理节点（决策 #136–#139，序列处理）：保边平滑 / 中值去斑 /
+# 形态学清理 / 像素放大。算子取舍全部来自 2026-09 源侧伪影调查的实测
+# （docs/research/gif-source-artifacts-and-node-candidates.md）。
+# ---------------------------------------------------------------------------
+
+# 保边平滑节点：滤波算法（键 = IM 算子，后端按此分支）。
+# - kuwahara：IM `-kuwahara`（默认）——调查里唯一「去噪 + 边缘变锐」双赢的算子；
+# - bilateral：IM `-bilateral-blur`——实测去噪极弱且成倍增加唯一色数
+#   （第 0 帧 254 → 3505 色），作为备选保留。
+EDGE_SMOOTH_ALGORITHM = ChoiceGroup(
+    "algorithm",
+    (
+        ChoiceOption("Kuwahara", "kuwahara"),
+        ChoiceOption("双边滤波", "bilateral"),
+    ),
+    default="Kuwahara",
+)
+
+# 中值去斑节点：滤波算法。
+# - median：IM `-statistic median WxH`（窗口由 MEDIAN_SIZE 决定）；
+# - despeckle：IM `-despeckle`（自带自适应斑点判定，不取窗口）。
+MEDIAN_FILTER_ALGORITHM = ChoiceGroup(
+    "algorithm",
+    (
+        ChoiceOption("中值滤波", "median"),
+        ChoiceOption("去斑(Despeckle)", "despeckle"),
+    ),
+    default="中值滤波",
+)
+
+# 中值去斑节点：中值滤波窗口（3×3 / 5×5 / 7×7）。
+# 做成下拉而非 3–7 数值滑条：滑条会放出 4×4 / 6×6 这类**非法偶数窗口**
+# （中值窗口必须为奇数），下拉把非法态从源头去掉。
+MEDIAN_SIZE = ChoiceGroup(
+    "size",
+    (
+        ChoiceOption("3×3", "3", 3),
+        ChoiceOption("5×5", "5", 5),
+        ChoiceOption("7×7", "7", 7),
+    ),
+    default="3×3",
+)
+
+# 形态学清理节点：开闭方向（**本节点最容易用错的一处**，help/文档必须明说）。
+# 实测（同源序列，基线过冲 6.38 级）：
+# - open（先腐蚀后膨胀）：去亮边（白边）最有效——过冲 → ≈0 级；
+# - close（先膨胀后腐蚀）：**反向加重白边**——过冲 → 8.93 级；
+# - lulu（先开后闭，默认）：过冲 → 1.72 级且平坦区噪声最低，最均衡。
+MORPH_MODE = ChoiceGroup(
+    "mode",
+    (
+        ChoiceOption("先开后闭(LULU)", "lulu"),
+        ChoiceOption("仅开(去亮边)", "open"),
+        ChoiceOption("仅闭(去暗边)", "close"),
+    ),
+    default="先开后闭(LULU)",
+)
+
+# 像素放大节点：整数放大倍数（传参值 = 整数倍数）。
+PIXEL_UPSCALE_FACTOR = ChoiceGroup(
+    "factor",
+    (
+        ChoiceOption("2×", "2", 2),
+        ChoiceOption("3×", "3", 3),
+        ChoiceOption("4×", "4", 4),
+    ),
+    default="2×",
+)
+
+# 像素放大节点：放大滤镜（键 = libavfilter 滤镜名，后端直接建图）。
+# - xbr：高精度边缘插值（线条/色块交界更平滑），支持 2×/3×/4×；
+# - epx：像素风放大，**libavfilter 只支持 2×/3×**（4× 触发内部溢出）；
+# - nearest：`scale=flags=neighbor` 整数倍最近邻（像素精确复制、不产生新色）。
+PIXEL_UPSCALE_FILTER = ChoiceGroup(
+    "filter",
+    (
+        ChoiceOption("xbr(平滑放大)", "xbr"),
+        ChoiceOption("epx(像素风)", "epx"),
+        ChoiceOption("最近邻(整数倍)", "nearest"),
+    ),
+    default="xbr(平滑放大)",
+)
+
+# 半调网点节点：网点形状（集群网点屏幕的轮廓形状，键供后端分支）。
+# 面积口径统一——三种形状都按「点的覆盖面积 = 该单元格的墨量占比」求半径/半边长，
+# 只有轮廓不同：圆形最柔和，方形/菱形更接近印刷网屏的几何感。
+HALFTONE_SHAPE = ChoiceGroup(
+    "shape",
+    (
+        ChoiceOption("圆形", "circle"),
+        ChoiceOption("方形", "square"),
+        ChoiceOption("菱形", "diamond"),
+    ),
+    default="圆形",
+)
+
+# 半调网点节点：网点角度（网点格子的旋转角，°）。
+# 0° = 点阵正对像素网格（最可预期，也是本项目默认）；45° 是印刷黑版经典网角
+# （斜向点阵最不容易看出行列结构）。角度只旋转网点格子，不改分辨率与网点间距。
+HALFTONE_ANGLE = ChoiceGroup(
+    "angle",
+    (
+        ChoiceOption("0°", "0", 0),
+        ChoiceOption("15°", "15", 15),
+        ChoiceOption("30°", "30", 30),
+        ChoiceOption("45°", "45", 45),
+        ChoiceOption("75°", "75", 75),
+    ),
+    default="0°",
+)

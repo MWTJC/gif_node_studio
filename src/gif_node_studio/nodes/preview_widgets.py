@@ -1,4 +1,13 @@
-"""预览控件：Wand 解码的 GIF 逐帧播放器 + 棋盘格透明背景预览标签。"""
+"""预览控件：逐帧播放器（GIF 走 Wand、APNG 走 Pillow）+ 棋盘格透明背景预览标签。
+
+两个播放器的契约相同（`start/pause/resume/stop` + `on_frame(raw, w, h)`），
+面板侧共用同一条显示通路；差别只在解码来源与时间信息来源（决策 #144）。
+
+出帧上限（决策 #146）：两个播放器都支持 `set_fps_limit(fps)`，「丢帧保时长」——
+固定墙钟周期出拍，按原生帧延迟累积跳过应落下帧，序列总时长不变。解码是随机
+访问的（Wand coalesce 序列 / Pillow 全帧列表），被跳过的帧不会解码，因此限帧
+能真实降低开销；走 `QMovie` 的素材不能丢帧（见 parameter_panel 的首帧保底）。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +16,34 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..core.color_tokens import DARK
 from ..media.image_utils import _wand_rgba_bytes
 from ..media.imagemagick import configure_imagemagick, require_wand
+from ..ui.fps_meter import note_paint
+from .preview_clock import render_clock
+
+
+def planned_steps(
+    durations: list[int] | tuple[int, ...],
+    index: int,
+    period_ms: float,
+    accum_ms: float,
+) -> tuple[int, float]:
+    """按墙钟累积推进：返回 ``(本拍应前进的帧数, 余量 ms)``（丢帧保时长）。
+
+    ``durations`` 循环取用（与播放器回卷一致），单帧时长下限 10ms（与
+    ``_delay_ms`` 同口径）。``accum_ms`` 为上一拍留下的余量，本拍先加上
+    ``period_ms`` 再逐帧扣减——扣掉的时长都真实流逝过，因此整轮播放时长
+    与原生一致，只是落下的帧被跳过。上限 = 序列长度（周期长于整轮时每拍
+    最多前进一轮）。
+    """
+    count = len(durations)
+    if count <= 0:
+        return 0, 0.0
+    accumulated = accum_ms + period_ms
+    steps = 0
+    while steps < count and accumulated >= max(10, durations[(index + steps) % count]):
+        accumulated -= max(10, durations[(index + steps) % count])
+        steps += 1
+    return steps, accumulated
+
 
 class GifPreviewPlayer(QtCore.QObject):
     """Wand 解码的 GIF 逐帧播放器（透明区域与序列预览一致）。
@@ -31,10 +68,32 @@ class GifPreviewPlayer(QtCore.QObject):
         self._count = 0
         self._index = 0
         self._repeats = 0
+        self._playing = False
         self._on_frame = None
+        # 出帧上限（决策 #146/#147）：None = 不限（逐帧按原生延迟，Coarse 定时器）；
+        # 有值时改由进程共享的**统一帧钟**驱动（`advance`），一拍最多换一帧，
+        # 拍长 = 1000/fps，按原生帧延迟累积丢帧（时长不变）。
+        self._fps_limit: int | None = None
+        self._accum_ms = 0.0
+
+    def set_fps_limit(self, fps: int | None) -> None:
+        """设置出帧上限（fps；None = 不限），播放中立即生效（切驱动源，不重建）。"""
+        fps = int(fps) if fps else None
+        if fps == self._fps_limit:
+            return
+        self._fps_limit = fps
+        self._accum_ms = 0.0
+        if not self._playing:
+            return
+        if fps:
+            self._timer.stop()
+            render_clock().register(self, fps)
+        else:
+            render_clock().unregister(self)
+            self._schedule_native()
 
     def start(self, path: str, durations: list[int], loop: int, on_frame) -> bool:
-        """打开 GIF 并 coalesce；成功后立即回调 ``on_frame(raw_rgba, w, h)`` 显示首帧并启动定时器。
+        """打开 GIF 并 coalesce；成功后立即回调 ``on_frame(raw_rgba, w, h)`` 显示首帧并启动播放。
 
         Wand/ImageMagick 不可用或解码失败时返回 ``False``（调用方回退 QMovie）。
         """
@@ -52,10 +111,20 @@ class GifPreviewPlayer(QtCore.QObject):
         self._loop = loop
         self._index = 0
         self._repeats = 0
+        self._accum_ms = 0.0
         self._on_frame = on_frame
         self._show(0)
-        self._schedule()
+        self._playing = True
+        self._start_driving()
         return True
+
+    def _start_driving(self) -> None:
+        """按是否有上限选择驱动源：统一帧钟（限帧）或自身定时器（原生）。"""
+        if self._fps_limit:
+            self._timer.stop()
+            render_clock().register(self, self._fps_limit)
+            return
+        self._schedule_native()
 
     def _show(self, index: int) -> None:
         try:
@@ -63,40 +132,75 @@ class GifPreviewPlayer(QtCore.QObject):
             if self._on_frame is not None:
                 self._on_frame(raw, width, height)
         except Exception:
-            self._timer.stop()  # 解码失败不再尝试换帧
+            # 解码失败：停止出帧（不动 wand——start() 里首次显示失败也要能正常返回）
+            self._playing = False
+            render_clock().unregister(self)
+            self._timer.stop()
 
     def _delay_ms(self) -> int:
         if not self._durations:
             return 100
         return max(10, self._durations[min(self._index, len(self._durations) - 1)])
 
-    def _schedule(self) -> None:
+    def _schedule_native(self) -> None:
+        self._timer.setTimerType(QtCore.Qt.TimerType.CoarseTimer)
         self._timer.start(self._delay_ms())
 
     def _next(self) -> None:
+        """原生路径：按帧延迟逐帧推进（不定时重排程）。"""
         self._index += 1
         if self._index >= self._count:
             self._repeats += 1
             if self._loop and self._repeats >= self._loop:
                 self._timer.stop()
+                self._playing = False
                 return
             self._index = 0
         self._show(self._index)
-        self._schedule()
+        self._schedule_native()
+
+    def advance(self, period_ms: float) -> None:
+        """统一帧钟驱动（决策 #147）：按拍长累积原生时间，跳过应丢的帧后换一帧。"""
+        if not self._playing or not self._durations:
+            return
+        steps, self._accum_ms = planned_steps(
+            self._durations, self._index, period_ms, self._accum_ms
+        )
+        if not steps:
+            return  # 本拍不出帧（只消耗墙钟，不解码不重绘）
+        ended = False
+        for _ in range(steps):
+            self._index += 1
+            if self._index >= self._count:
+                self._repeats += 1
+                if self._loop and self._repeats >= self._loop:
+                    ended = True
+                    break
+                self._index = 0
+        self._show(self._index)
+        if ended:
+            self._playing = False
+            render_clock().unregister(self)
 
     def pause(self) -> None:
-        """暂停播放：停止帧定时器（当前帧保持显示）。
+        """暂停播放：停止帧定时器并退出统一帧钟（当前帧保持显示）。
 
         窗口最小化/非前台时由面板调用，消除空闲时的换帧解码与重绘开销。
         """
+        self._playing = False
+        render_clock().unregister(self)
         self._timer.stop()
 
     def resume(self) -> None:
-        """恢复播放：按当前帧延迟重新启动帧定时器。"""
+        """恢复播放：重新按上限/原生延迟驱动。"""
         if self._wand is not None:
-            self._schedule()
+            self._accum_ms = 0.0
+            self._playing = True
+            self._start_driving()
 
     def stop(self) -> None:
+        self._playing = False
+        render_clock().unregister(self)
         self._timer.stop()
         if self._wand is not None:
             try:
@@ -106,6 +210,178 @@ class GifPreviewPlayer(QtCore.QObject):
             self._wand = None
 
 
+
+
+class ApngPreviewPlayer(QtCore.QObject):
+    """Pillow 解码的 APNG 逐帧播放器（Qt 读 PNG 只解首帧，不认 acTL 动画块）。
+
+    与 ``GifPreviewPlayer`` 同契约（``start`` / ``pause`` / ``resume`` / ``stop``，每帧
+    回调 ``on_frame(raw_rgba, w, h)``），面板侧复用同一条 ``_on_gif_frame`` 显示通路
+    （透明区域与序列预览一致）。差别在解码与时间信息：APNG 没有 GIF 那样可扫的块结构，
+    Qt 的 QMovie 实测 ``imageCount=1`` / ``supportsAnimation=False``（决策 #144），因此
+    用 Pillow 逐帧 ``seek``——帧数、每帧 duration、循环次数全部由 Pillow 给出，不需要
+    自写 APNG 块解析。
+
+    开播时一次性解码全部帧并**立即关闭文件**（Windows 下不长期占缓存文件锁，重跑/清缓存
+    可以替换它），内存与帧数上限沿用 GIF 预览同口径；超限或解码失败返回 ``False``，
+    调用方回退静态首帧。
+    """
+
+    def __init__(self, parent=None, *, max_frames: int = 512, memory_budget: int = 64 * 1024 * 1024):
+        super().__init__(parent)
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._next)
+        self._max_frames = int(max_frames)
+        self._memory_budget = int(memory_budget)
+        self._frames: list[bytes] = []
+        self._width = 0
+        self._height = 0
+        self._durations: list[int] = []
+        self._loop = 1          # 0 = 无限，正数 = 循环次数
+        self._index = 0
+        self._repeats = 0
+        self._playing = False
+        self._on_frame = None
+        # 出帧上限（决策 #146/#147）：与 GifPreviewPlayer 同款——限帧时由统一
+        # 帧钟驱动、丢帧保时长；未设上限时自身定时器按原生延迟出帧。
+        self._fps_limit: int | None = None
+        self._accum_ms = 0.0
+
+    def set_fps_limit(self, fps: int | None) -> None:
+        """设置出帧上限（fps；None = 不限），播放中立即生效（切驱动源，不重建）。"""
+        fps = int(fps) if fps else None
+        if fps == self._fps_limit:
+            return
+        self._fps_limit = fps
+        self._accum_ms = 0.0
+        if not self._playing:
+            return
+        if fps:
+            self._timer.stop()
+            render_clock().register(self, fps)
+        else:
+            render_clock().unregister(self)
+            self._schedule_native()
+
+    def start(self, path: str, on_frame) -> bool:
+        """解码 APNG 全部帧；成功后立即回调 ``on_frame(raw_rgba, w, h)`` 显示首帧并启动播放。"""
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                count = int(getattr(image, "n_frames", 1))
+                if count <= 1 or count > self._max_frames:
+                    return False
+                image.seek(0)
+                width, height = image.size
+                if count * width * height * 4 > self._memory_budget:
+                    return False
+                frames: list[bytes] = []
+                durations: list[int] = []
+                for index in range(count):
+                    image.seek(index)
+                    frames.append(image.convert("RGBA").tobytes())
+                    durations.append(int(image.info.get("duration") or 0))
+                loop = image.info.get("loop", 0)
+        except Exception:
+            self.stop()
+            return False
+        self._frames = frames
+        self._width = width
+        self._height = height
+        self._durations = durations
+        # Pillow 语义：loop=0 无限、None 未声明（播放一次）、正数 = 循环次数。
+        self._loop = 0 if loop == 0 else int(loop or 1)
+        self._index = 0
+        self._repeats = 0
+        self._accum_ms = 0.0
+        self._on_frame = on_frame
+        self._show(0)
+        self._playing = True
+        self._start_driving()
+        return True
+
+    def _start_driving(self) -> None:
+        """按是否有上限选择驱动源：统一帧钟（限帧）或自身定时器（原生）。"""
+        if self._fps_limit:
+            self._timer.stop()
+            render_clock().register(self, self._fps_limit)
+            return
+        self._schedule_native()
+
+    def _show(self, index: int) -> None:
+        if not (0 <= index < len(self._frames)):
+            self.stop()
+            return
+        if self._on_frame is not None:
+            self._on_frame(self._frames[index], self._width, self._height)
+
+    def _delay_ms(self) -> int:
+        if not self._durations:
+            return 100
+        value = self._durations[min(self._index, len(self._durations) - 1)]
+        return max(10, value) if value else 100
+
+    def _schedule_native(self) -> None:
+        self._timer.setTimerType(QtCore.Qt.TimerType.CoarseTimer)
+        self._timer.start(self._delay_ms())
+
+    def _next(self) -> None:
+        """原生路径：按帧延迟逐帧推进。"""
+        self._index += 1
+        if self._index >= len(self._frames):
+            self._repeats += 1
+            if self._loop and self._repeats >= self._loop:
+                self._timer.stop()
+                self._playing = False
+                return
+            self._index = 0
+        self._show(self._index)
+        self._schedule_native()
+
+    def advance(self, period_ms: float) -> None:
+        """统一帧钟驱动（决策 #147）：按拍长累积原生时间，跳过应丢的帧后换一帧。"""
+        if not self._playing or not self._durations:
+            return
+        steps, self._accum_ms = planned_steps(
+            self._durations, self._index, period_ms, self._accum_ms
+        )
+        if not steps:
+            return
+        ended = False
+        for _ in range(steps):
+            self._index += 1
+            if self._index >= len(self._frames):
+                self._repeats += 1
+                if self._loop and self._repeats >= self._loop:
+                    ended = True
+                    break
+                self._index = 0
+        self._show(self._index)
+        if ended:
+            self._playing = False
+            render_clock().unregister(self)
+
+    def pause(self) -> None:
+        """暂停播放：停止帧定时器并退出统一帧钟（当前帧保持显示）。"""
+        self._playing = False
+        render_clock().unregister(self)
+        self._timer.stop()
+
+    def resume(self) -> None:
+        """恢复播放：重新按上限/原生延迟驱动。"""
+        if self._frames:
+            self._accum_ms = 0.0
+            self._playing = True
+            self._start_driving()
+
+    def stop(self) -> None:
+        self._playing = False
+        render_clock().unregister(self)
+        self._timer.stop()
+        self._frames = []
+        self._durations = []
+        self._on_frame = None
 
 
 class CheckerPreviewLabel(QtWidgets.QLabel):
@@ -308,6 +584,7 @@ class CheckerPreviewLabel(QtWidgets.QLabel):
         return QtCore.QRectF(x, y, w, h)
 
     def paintEvent(self, event) -> None:
+        note_paint()  # 状态栏「绘制 fps」的唯一计数点（决策 #146）
         dpr = self._current_dpr()
         painter = QtGui.QPainter(self)
         # 背景：棋盘格 / 纯色 / 默认深色

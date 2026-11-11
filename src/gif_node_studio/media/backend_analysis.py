@@ -442,3 +442,142 @@ def _progress(progress: ProgressReporter | None, fraction: float | None, label: 
     """模块版（决策 #120）：等价原 ``MediaBackend._progress``。"""
     if progress is not None:
         progress(fraction, label)
+
+
+def _sample_indices(total: int, samples: int) -> tuple[int, ...]:
+    """采样帧下标：``samples <= 0`` 或 ≥ 总帧数时取全部帧，否则均匀取样。"""
+    if total <= 0:
+        raise ValueError("伪影诊断：输入没有帧")
+    if samples < 0:
+        raise ValueError(f"伪影诊断：采样帧数不能为负数（{samples}）")
+    if samples == 0 or samples >= total:
+        return tuple(range(total))
+    return tuple(sorted({int(round(value)) for value in np.linspace(0, total - 1, samples)}))
+
+
+def _manifest_frames_untouched(manifest: MediaManifest) -> bool:
+    """静态图片序列清单是否未被裁剪/截取/缩放修改（同「图片1:1分辨率查看」口径）。"""
+    from ..core.domain import CropSpec
+
+    return (
+        manifest.crop == CropSpec()
+        and manifest.start is None
+        and manifest.end is None
+        and manifest.scale_percent == 100
+    )
+
+
+def artifact_metrics(workspace, imagemagick, progress, manifest: MediaManifest | None=None,
+                     sequence: SequenceArtifact | None=None, *, samples: int=8, heatmap: bool=False):
+    """伪影诊断：度量源侧伪影（振铃白边/边缘软硬/抖动杂色），可选伪影热力图。
+
+    度量口径与纯函数模块 ``media/artifact_metrics.py`` 一致（该模块的数值与
+    2026-09 源侧伪影调查的实测数字可直接对照）。统计项：
+
+    - 每帧色数（中位）/ 并集色数 / 最大单色占比——判断是否「抖动杂色吃光色板」；
+    - 平坦区噪声（最平坦 5% 的 16×16 亮度块 std）——平坦区残留杂色幅度；
+    - 振铃过冲（强边亮侧过冲均值，级）+ 过冲边缘占比——「白边」的量化形态；
+    - 边缘过渡宽度（强边 10%–90% 中位 px）——边缘软硬（视频/重采样软边的判据）；
+    - 孤立斑点占比——局部平坦却偏离邻域中值的像素（误差扩散仿色的白点属此类）。
+
+    输入（二者选一）：
+
+    - ``sequence``：图片序列（格式化输出），逐帧读 PNG 度量；
+    - ``manifest``：GIF 文件清单（先复制进本节点工作区再解码，分析自有缓存
+      副本，同 ``analysis_gif_frames``），或**未被裁剪/截取/缩放**的静态图片
+      序列清单（源文件即原始帧）。视频清单与已被修改的序列清单报清晰中文
+      错误——这两类必须先经「格式化」物化出帧。
+
+    透明像素按解码出的 RGB 值参与统计（GIF 透明区通常为色板占位色）。
+
+    ``samples``：采样帧数（0 或 ≥ 总帧数 = 全部帧），均匀取样。
+    ``heatmap``：为真时预览图为基帧叠加标记（红 = 亮侧过冲像素，
+    蓝 = 孤立斑点像素），否则预览图即首采样帧。
+
+    返回 ``AnalysisResult(预览图路径, 指标元数据)``。
+    """
+    from .artifact_metrics import heatmap as artifact_heatmap
+    from .artifact_metrics import measure_frames
+
+    indices: tuple[int, ...] = ()
+    frames: list[np.ndarray] = []
+    width = height = 0
+    preview: Path | None = None
+    if sequence is not None and sequence.frames:
+        paths = list(sequence.frames)
+        total = len(paths)
+        width, height = sequence.width, sequence.height
+        indices = _sample_indices(total, int(samples))
+        output = _job_dir(workspace, "artifact_metrics")
+        for order, index in enumerate(indices):
+            with Image.open(paths[index]) as image:
+                frames.append(np.asarray(image.convert("RGB"), dtype=np.uint8))
+            _progress(progress, (order + 1) / len(indices), "伪影诊断")
+        source_label = "图片序列"
+    elif manifest is not None and manifest.sources:
+        source = Path(manifest.sources[0])
+        if manifest.kind is MediaKind.ANIMATED_IMAGE:
+            require_wand(imagemagick, "伪影诊断")
+            from wand.image import Image as WandImage
+
+            if not source.is_file():
+                raise ValueError(f"伪影诊断：输入文件不存在（{source}）")
+            output = _job_dir(workspace, "artifact_metrics")
+            # 分析自有缓存副本：解码只打开本节点工作区的副本，不占用上游文件
+            # （Windows 句柄；同 gif优化分析）。
+            local = output / "source.gif"
+            shutil.copy2(source, local)
+            with WandImage(filename=str(local)) as gif:
+                gif.coalesce()
+                total = len(gif.sequence)
+                indices = _sample_indices(total, int(samples))
+                for order, index in enumerate(indices):
+                    raw, width, height = _wand_rgba_bytes(gif.sequence[index])
+                    rgba = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4)
+                    frames.append(np.ascontiguousarray(rgba[..., :3]))
+                    _progress(progress, (order + 1) / len(indices), "伪影诊断")
+            source_label = "GIF 文件"
+        elif manifest.kind is MediaKind.STATIC_SEQUENCE and _manifest_frames_untouched(manifest):
+            paths = list(manifest.sources)
+            total = len(paths)
+            indices = _sample_indices(total, int(samples))
+            output = _job_dir(workspace, "artifact_metrics")
+            for order, index in enumerate(indices):
+                with Image.open(paths[index]) as image:
+                    frames.append(np.asarray(image.convert("RGB"), dtype=np.uint8))
+                    width, height = image.width, image.height
+                _progress(progress, (order + 1) / len(indices), "伪影诊断")
+            source_label = "图片序列清单"
+        elif manifest.kind is MediaKind.VIDEO:
+            raise ValueError("伪影诊断：视频清单没有物化帧，请先接「格式化」再连接图片序列")
+        else:
+            raise ValueError(
+                "伪影诊断：该清单已被裁剪/截取/缩放，请改为连接格式化后的图片序列"
+            )
+    else:
+        raise ValueError("伪影诊断：节点无输入")
+
+    result = measure_frames(frames)
+    assert output is not None
+    if heatmap:
+        marked = artifact_heatmap(frames[0])
+        preview = output / "heatmap.png"
+        Image.fromarray(marked, "RGB").save(preview, "PNG", compress_level=PNG_CACHE_COMPRESS_LEVEL)
+    else:
+        preview = output / "preview.png"
+        Image.fromarray(frames[0], "RGB").save(preview, "PNG", compress_level=PNG_CACHE_COMPRESS_LEVEL)
+    metadata = {
+        "指标来源": f"{source_label}（采样 {len(frames)} / {total} 帧）",
+        "分辨率": f"{width} × {height}",
+        "每帧色数": f"{result['每帧色数']:.0f} 色（中位）",
+        "并集色数": f"{result['并集色数']:.0f} 色",
+        "最大单色占比": f"{result['最大单色占比']:.1f} %",
+        "平坦区噪声": f"{result['平坦区噪声']:.2f} 级（std）",
+        "振铃过冲": f"{result['振铃过冲']:.2f} 级（均值）",
+        "过冲边缘占比": f"{result['有过冲边缘']:.1f} %",
+        "边缘过渡宽度": f"{result['边缘过渡宽度']:.1f} px（中位）",
+        "孤立斑点占比": f"{result['孤立斑点']:.3f} %",
+    }
+    from ..core.domain import AnalysisResult
+
+    return AnalysisResult(str(preview), metadata)

@@ -507,6 +507,45 @@ def frame_optimization_ratio(
     return max(0.0, ratio), baseline, frame_count
 
 
+def format_fps(durations_ms: list[int]) -> str:
+    """播放帧率展示：平均帧时间（>0 的延迟）换算 fps。
+
+    与 gif优化分析「全局帧率」同口径（决策 #121）：帧优化/漂移补偿 GIF 的帧时间
+    不恒定（如 30/40ms 交替），用**均值**才反映真实播放速率；中位数会把「多数短帧
+    + 少数长帧」误算成偏快。无有效延迟时返回 ``—``。
+    """
+    positive = [value for value in durations_ms if value > 0]
+    if not positive:
+        return "—"
+    fps = 1000.0 / (sum(positive) / len(positive))
+    return f"{fps:.3f}".rstrip("0").rstrip(".") + " fps"
+
+
+def gif_export_summary(path: str | Path) -> dict[str, str]:
+    """导出后 GIF 的**实测**「尺寸 / 帧速」（块结构扫描，不解码像素）。
+
+    导出参数（尺寸 %、帧速、gifski 宽高限制、往复）与实际文件可能不一致
+    （GIF 帧延迟按 10ms 量化、gifski 默认 ~800×600、往复会翻倍帧数），故元数据
+    一律读回产物而非回显参数；解析失败时两项都给 ``—``（键始终存在）。
+    """
+    parsed = _gif_parse(path)
+    if parsed is None:
+        return {"尺寸": "—", "帧速": "—"}
+    return {
+        "尺寸": f"{parsed['width']} × {parsed['height']}",
+        "帧速": format_fps(parsed["durations_ms"]),
+    }
+
+
+def image_dimensions(path: str | Path) -> str:
+    """图片文件的实际像素尺寸（WebP/APNG 等导出产物）；读取失败返回 ``—``。"""
+    try:
+        with Image.open(Path(path)) as image:
+            return f"{image.width} × {image.height}"
+    except Exception:
+        return "—"
+
+
 def gif_native_fps(path: str | Path) -> float:
     """GIF 源原生帧率：帧时间（毫秒）中位数换算为 fps（1000 / 中位数 ms）。
 

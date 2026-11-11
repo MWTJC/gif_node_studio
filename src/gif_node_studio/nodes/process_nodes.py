@@ -47,6 +47,7 @@ class BrightnessNode(SequenceNode):
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(FloatParam("amount", "亮度 %", default=0.0, minimum=-100, maximum=100),),
+                panel=PanelSpec(scrub_frames=True),
             ),
             help=(
                 "输入图片序列\n"
@@ -80,6 +81,7 @@ class SaturationNode(SequenceNode):
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
                 params=(FloatParam("amount", "饱和度 %", default=0.0, minimum=-100, maximum=200),),
+                panel=PanelSpec(scrub_frames=True),
             ),
             help=(
                 "输入图片序列\n"
@@ -199,6 +201,7 @@ class ColorBalanceNode(SequenceNode):
                     FloatParam("green", "绿", default=0.0, minimum=-100, maximum=100),
                     FloatParam("blue", "蓝", default=0.0, minimum=-100, maximum=100),
                 ),
+                panel=PanelSpec(scrub_frames=True),
             ),
             help=(
                 "输入图片序列\n"
@@ -358,6 +361,60 @@ class InvertNode(SequenceNode):
     @classmethod
     def execute(cls, inputs, params, backend):
         return backend.invert_sequence(cls.sequence(inputs))
+
+
+
+
+class LevelsNode(SequenceNode):
+    """色阶：按输入黑白场 + 伽马重映射每帧明暗（把两端的浅灰吸到纯黑/纯白）。
+
+    处理：backend.levels_sequence(in_black=..., in_white=..., gamma=..., out_black=..., out_white=...)
+    参数：in_black/in_white/out_black/out_white（IntParam 滑条+数值框，0..255）、gamma（FloatParam 滑条+数值框，0.1..9.9，默认 1.0）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    与「对比度」的分工：对比度是绕均值线性放大（拉不开两端），色阶直接指定黑白场
+    ——「比黑场暗的一律纯黑、比白场亮的一律纯白」，配合伽马调中间调。做二值/半调
+    素材时先用它把接近纯白/纯黑的浅灰吸到两端，可以少生成一批低于工艺极限的极浅点。
+    """
+
+    NODE_NAME = "色阶"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "levels", self.NODE_NAME, NodeCategory.PROCESS,
+                icon=category_icon(NodeCategory.PROCESS, "mdi.chart-bell-curve"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    IntParam("in_black", "输入黑场", default=0, minimum=0, maximum=254),
+                    IntParam("in_white", "输入白场", default=255, minimum=1, maximum=255),
+                    FloatParam("gamma", "伽马", default=1.0, minimum=0.1, maximum=9.9),
+                    IntParam("out_black", "输出黑场", default=0, minimum=0, maximum=255),
+                    IntParam("out_white", "输出白场", default=255, minimum=0, maximum=255),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "输入黑场：比它暗的像素一律压成纯黑\n"
+                "输入白场：比它亮的像素一律提成纯白\n"
+                "伽马：大于 1 提亮中间调、小于 1 压暗中间调\n"
+                "输出黑场 / 输出白场：把结果压进这个范围（一般不用改）\n"
+                "输出图片序列（Alpha 保留）"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        return backend.levels_sequence(
+            cls.sequence(inputs),
+            in_black=int(params["in_black"]),
+            in_white=int(params["in_white"]),
+            gamma=float(params["gamma"]),
+            out_black=int(params["out_black"]),
+            out_white=int(params["out_white"]),
+        )
 
 
 

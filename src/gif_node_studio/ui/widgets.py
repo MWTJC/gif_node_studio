@@ -42,7 +42,21 @@ class HelpWidget(QtWidgets.QWidget):
         self.title.setText(node.definition.title)
         self.category.setText(f"类型：{node.definition.category.value}")
         self.text.setText(node.help)
-        self.metadata.setText(display_metadata(node.output_metadata))
+        self.metadata.setText(self._metadata_text(node))
+
+    @staticmethod
+    def _metadata_text(node) -> str:
+        """输出元数据文本：有结果 → 结果；空态 → 基础字段骨架（决策 #142）。
+
+        空态骨架来自节点自身的 ``METADATA_SPEC``（族基类默认 / 具体节点覆写）；
+        未声明字段的节点回落通用占位文案。骨架只列基础字段，动态探测项在运行
+        后追加（``spec.extras`` 用一行提示表达）。
+        """
+        if node.output_metadata:
+            return display_metadata(node.output_metadata)
+        spec = getattr(node, "METADATA_SPEC", None)
+        skeleton = spec.skeleton_text() if spec is not None else ""
+        return skeleton or "运行节点后将在此显示输出元数据。"
 
     def show_definition(self, definition, help_text: str) -> None:
         """显示节点库悬停按钮对应的节点类型说明（尚无输出元数据）。"""

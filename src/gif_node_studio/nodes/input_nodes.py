@@ -24,6 +24,7 @@ from .definitions import (
     VideoFileParam,
 )
 from .icon_resource import category_icon
+from .metadata_spec import MANIFEST_META, SEQUENCE_META
 from .node_base import StudioNode
 from .parameter_panel import ParameterPanel
 
@@ -36,6 +37,9 @@ class VideoInputNode(StudioNode):
     """
 
     NODE_NAME = "视频输入"
+
+    # 输入节点同族默认：清单产物 → 基础两项，文件探测项运行时追加（决策 #142）。
+    METADATA_SPEC = MANIFEST_META
 
     def __init__(self):
         super().__init__(
@@ -73,6 +77,9 @@ class ImageSequenceInputNode(StudioNode):
     """
 
     NODE_NAME = "静态图片序列输入"
+
+    # 输入节点同族默认：清单产物 → 基础两项，文件探测项运行时追加（决策 #142）。
+    METADATA_SPEC = MANIFEST_META
 
     def __init__(self):
         super().__init__(
@@ -117,6 +124,9 @@ class GifInputNode(StudioNode):
 
     NODE_NAME = "GIF 输入"
 
+    # 输入节点同族默认：清单产物 → 基础两项，文件探测项运行时追加（决策 #142）。
+    METADATA_SPEC = MANIFEST_META
+
     def __init__(self):
         super().__init__(
             definition=NodeDefinition(
@@ -153,6 +163,9 @@ class IcoInputNode(StudioNode):
     """
 
     NODE_NAME = "ICO 输入"
+
+    # 输入节点同族默认：清单产物 → 基础两项，文件探测项运行时追加（决策 #142）。
+    METADATA_SPEC = MANIFEST_META
 
     def __init__(self):
         super().__init__(
@@ -193,6 +206,9 @@ class BlankSequenceNode(StudioNode):
     """
 
     NODE_NAME = "空白序列"
+
+    # 无输入的序列生成器：产物为图片序列 → 序列三项基础字段（决策 #142）。
+    METADATA_SPEC = SEQUENCE_META
 
     def __init__(self):
         super().__init__(
@@ -242,6 +258,9 @@ class GradientSequenceNode(StudioNode):
     """
 
     NODE_NAME = "渐变色序列"
+
+    # 无输入的序列生成器：产物为图片序列 → 序列三项基础字段（决策 #142）。
+    METADATA_SPEC = SEQUENCE_META
 
     def __init__(self):
         super().__init__(

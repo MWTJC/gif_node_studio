@@ -20,7 +20,7 @@ from ..core.options import (
     GIFSKI_FAST_MODE,
 )
 from ..media.backend_cache import _remove_path
-from ..media.media_info import format_bytes
+from ..media.media_info import format_bytes, gif_export_summary, image_dimensions
 from .definitions import (
     BoolParam,
     ChoiceParam,
@@ -35,6 +35,7 @@ from .definitions import (
     PortType,
 )
 from .icon_resource import category_icon
+from .metadata_spec import EXPORT_FILE_META, FILE_LIST_META, GIF_EXPORT_META, MetaField, MetadataSpec
 from .node_base import StudioNode
 from .parameter_panel import ParameterPanel
 from .sequence_nodes import SequenceNode
@@ -53,6 +54,9 @@ class IconComposeNode(SequenceNode):
     """
 
     NODE_NAME = "ICO 合成"
+
+    # 导出终端：实测尺寸 / 文件大小（决策 #143）。
+    METADATA_SPEC = EXPORT_FILE_META
 
     # 输出类节点框架契约（ui.py 按类属性派生导出按钮分派与固定缓存保留）：
     EXPORT_KIND = "ico"                 # 导出类型（ui.export_node 按此分派）
@@ -115,9 +119,13 @@ class IconComposeNode(SequenceNode):
         manifest = MediaManifest(MediaKind.STATIC_SEQUENCE, tuple(artifact.frames))
         # 输出类节点元数据契约：仅关键信息（可读文件大小）——由本节点的
         # describe_output 覆写直接透出，不再逐端口展开。
+        # 元数据：实测输出尺寸（ICO 容器最大档）+ 可读文件大小（决策 #143）。
         return MultiOutput(
             {"序列图片": artifact, "格式化清单": manifest},
-            metadata={"文件大小": format_bytes(ico_path.stat().st_size)},
+            metadata={
+                "尺寸": f"{artifact.width} × {artifact.height}",
+                "文件大小": format_bytes(ico_path.stat().st_size),
+            },
         )
 
 
@@ -135,10 +143,16 @@ class GifExportNode(SequenceNode):
 
     NODE_NAME = "GIF 合成"
 
+    # GIF 导出终端：实测尺寸 / 帧速 / 文件大小（决策 #143）。
+    METADATA_SPEC = GIF_EXPORT_META
+
     # 导出终端节点的框架契约（ui.py 按类属性派生导出按钮分派与固定缓存保留，
     # 不再平行维护 kind 字符串集合/缓存文件名常量）：
     EXPORT_KIND = "gif"                 # 导出类型（ui.export_node 按此分派）
     CACHE_FILENAME = "preview.gif"      # 运行写入本节点工作区的固定缓存文件
+
+    # 产物自身可播放 → 预览框播放真实产物（决策 #144）
+    PREVIEW_PRODUCT = True
 
     def __init__(self):
         super().__init__(
@@ -197,7 +211,7 @@ class GifExportNode(SequenceNode):
         # describe_output 覆写直接透出。
         return MultiOutput(
             {"序列图片": artifact, "格式化清单": manifest},
-            metadata={"文件大小": format_bytes(path.stat().st_size)},
+            metadata={**gif_export_summary(path), "文件大小": format_bytes(path.stat().st_size)},
         )
 
 
@@ -220,10 +234,16 @@ class GifExportFfmpegNode(SequenceNode):
 
     NODE_NAME = "GIF 合成（FFmpeg）"
 
+    # GIF 导出终端：实测尺寸 / 帧速 / 文件大小（决策 #143）。
+    METADATA_SPEC = GIF_EXPORT_META
+
     # 导出终端节点的框架契约（与 GIF 合成/GIF 优化节点一致）：
     # ui.py 按 EXPORT_KIND="gif" 分派导出，固定缓存 preview.gif。
     EXPORT_KIND = "gif"
     CACHE_FILENAME = "preview.gif"
+
+    # 产物自身可播放 → 预览框播放真实产物（决策 #144）
+    PREVIEW_PRODUCT = True
 
     def __init__(self):
         super().__init__(
@@ -294,7 +314,7 @@ class GifExportFfmpegNode(SequenceNode):
         # describe_output 覆写直接透出。
         return MultiOutput(
             {"序列图片": artifact, "格式化清单": manifest},
-            metadata={"文件大小": format_bytes(path.stat().st_size)},
+            metadata={**gif_export_summary(path), "文件大小": format_bytes(path.stat().st_size)},
         )
 
 
@@ -319,10 +339,16 @@ class GifExportGifskiNode(SequenceNode):
 
     NODE_NAME = "GIF 合成（gifski）"
 
+    # GIF 导出终端：实测尺寸 / 帧速 / 文件大小（决策 #143）。
+    METADATA_SPEC = GIF_EXPORT_META
+
     # 导出终端节点的框架契约（与 GIF 合成/GIF 优化节点一致）：
     # ui.py 按 EXPORT_KIND="gif" 分派导出，固定缓存 preview.gif。
     EXPORT_KIND = "gif"
     CACHE_FILENAME = "preview.gif"
+
+    # 产物自身可播放 → 预览框播放真实产物（决策 #144）
+    PREVIEW_PRODUCT = True
 
     def __init__(self):
         super().__init__(
@@ -401,7 +427,7 @@ class GifExportGifskiNode(SequenceNode):
         manifest = MediaManifest(MediaKind.ANIMATED_IMAGE, (str(path),))
         return MultiOutput(
             {"序列图片": artifact, "格式化清单": manifest},
-            metadata={"文件大小": format_bytes(path.stat().st_size)},
+            metadata={**gif_export_summary(path), "文件大小": format_bytes(path.stat().st_size)},
         )
 
 
@@ -424,10 +450,18 @@ class GifOptimizeNode(StudioNode):
 
     NODE_NAME = "GIF 优化（gifsicle）"
 
+    # GIF 优化元数据恒为三项：优化前/后大小 + 压缩率（决策 #142）。
+    METADATA_SPEC = MetadataSpec((
+        MetaField("优化前大小"), MetaField("优化后大小"), MetaField("压缩率"),
+    ))
+
     # 导出终端节点的框架契约：与 GIF 合成节点一致——固定缓存 preview.gif，
     # 导出按钮把优化后的 GIF 复制到用户路径（ui.py 按 EXPORT_KIND 分派）。
     EXPORT_KIND = "gif"
     CACHE_FILENAME = "preview.gif"
+
+    # 产物自身可播放 → 预览框播放真实产物（决策 #144）
+    PREVIEW_PRODUCT = True
     ico_center = 0.25
     def __init__(self):
         super().__init__(
@@ -531,10 +565,16 @@ class PngExportNode(SequenceNode):
 
     处理：backend.export_pngs（写固定缓存 preview_frames/）
     参数：无
-    组件：导出按钮（PanelSpec.export_enabled）
+    组件：导出按钮 + 帧滑条（PanelSpec.export_enabled, scrub_frames）
+
+    产物是帧目录（不可播放），逐帧查看由帧滑条承担（决策 #144）：``execute`` 返回
+    写入的文件元组，ui 侧把它当「帧路径列表」喂滑条（见 ``ui._frame_path_list``）。
     """
 
     NODE_NAME = "格式化 PNG 输出"
+
+    # PNG 序列导出不覆写 describe_output：返回文件元组，元数据为两项（决策 #142）。
+    METADATA_SPEC = FILE_LIST_META
 
     # 导出终端节点的框架契约（与 GifExportNode 一致，ui.py 据此分派导出）。
     EXPORT_KIND = "png"                  # 导出类型（ui.export_node 按此分派）
@@ -546,7 +586,8 @@ class PngExportNode(SequenceNode):
                 "png_export", self.NODE_NAME, NodeCategory.OUTPUT,
                 icon=category_icon(NodeCategory.OUTPUT, "mdi6.file-png-box"),
                 inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
-                panel=PanelSpec(export_enabled=True),
+                # 产物是帧目录（不可播放）→ 帧滑条逐帧查看（决策 #144）。
+                panel=PanelSpec(scrub_frames=True, export_enabled=True),
             ),
             help=(
                 "输入图片序列\n"
@@ -575,8 +616,9 @@ class WebpExportNode(SequenceNode):
     处理：backend.export_webp → MultiOutput(序列图片)
     参数：fps/size_percent/quality（IntParam/FloatParam 数值）、
           lossless/transparent_preview（BoolParam 勾选框）
-    组件：导出按钮 + 1:1 预览 + 透明背景显示
-          （PanelSpec.export_enabled, preview_1to1, preview_bg_param）
+    组件：导出按钮 + 1:1 预览（播放产物）+ 透明背景显示
+          （PanelSpec.export_enabled, preview_1to1, preview_bg_param,
+          PREVIEW_PRODUCT；动画 WebP 由 Qt 内置 qwebp 插件播放，决策 #144）
 
     RGBA 逐帧无损保留 alpha；WebP 动画体积通常远小于 GIF。输出为
     「序列图片」透传端口（供继续处理/预览），固定缓存 preview.webp。
@@ -584,10 +626,16 @@ class WebpExportNode(SequenceNode):
 
     NODE_NAME = "WebP 动画导出"
 
+    # 导出终端：基础字段「尺寸 / 文件大小」，透明序列无损时追加「编码」（决策 #143）。
+    METADATA_SPEC = EXPORT_FILE_META
+
     # 导出终端节点的框架契约（与其它输出节点一致）：
     # ui.py 按 EXPORT_KIND="webp" 分派导出，固定缓存 preview.webp。
     EXPORT_KIND = "webp"
     CACHE_FILENAME = "preview.webp"
+
+    # 产物自身可播放 → 预览框播放真实产物（决策 #144）
+    PREVIEW_PRODUCT = True
     def __init__(self):
         super().__init__(
             definition=NodeDefinition(
@@ -643,7 +691,10 @@ class WebpExportNode(SequenceNode):
         # 不输出格式化清单端口）。输出类节点元数据契约：仅关键信息（可读
         # 文件大小）。序列含透明时后端强制无损（Pillow 有损路径丢 alpha），
         # 元数据如实报告编码模式。
-        metadata: dict[str, Any] = {"文件大小": format_bytes(cache.stat().st_size)}
+        metadata: dict[str, Any] = {
+            "尺寸": image_dimensions(cache),
+            "文件大小": format_bytes(cache.stat().st_size),
+        }
         if artifact.has_alpha and not bool(params["lossless"]):
             metadata["编码"] = "无损（序列含透明）"
         return MultiOutput({"序列图片": artifact}, metadata=metadata)
@@ -656,8 +707,9 @@ class ApngExportNode(SequenceNode):
     处理：backend.export_apng → MultiOutput(序列图片)
     参数：fps（FloatParam 滑条+数值框）、size_percent（IntParam 滑条+数值框）、
           transparent_preview（BoolParam 勾选框，纯显示）
-    组件：导出按钮 + 1:1 预览 + 透明背景显示
-          （PanelSpec.export_enabled, preview_1to1, preview_bg_param）
+    组件：导出按钮 + 1:1 预览（播放产物）+ 透明背景显示
+          （PanelSpec.export_enabled, preview_1to1, preview_bg_param,
+          PREVIEW_PRODUCT；Qt 不解 APNG 动画，走 Pillow 播放器，决策 #144）
 
     无损格式（PNG 帧 + acTL 动画块），alpha 全保留。输出为「序列图片」
     透传端口，固定缓存 preview.apng。
@@ -665,9 +717,15 @@ class ApngExportNode(SequenceNode):
 
     NODE_NAME = "APNG 导出"
 
+    # 导出终端：实测尺寸 / 文件大小（决策 #143）。
+    METADATA_SPEC = EXPORT_FILE_META
+
     # 导出终端节点的框架契约：ui.py 按 EXPORT_KIND="apng" 分派导出。
     EXPORT_KIND = "apng"
     CACHE_FILENAME = "preview.apng"
+
+    # 产物自身可播放 → 预览框播放真实产物（决策 #144）
+    PREVIEW_PRODUCT = True
 
     def __init__(self):
         super().__init__(
@@ -716,5 +774,5 @@ class ApngExportNode(SequenceNode):
         # 不输出格式化清单端口）。输出类节点元数据契约：仅关键信息（可读文件大小）。
         return MultiOutput(
             {"序列图片": artifact},
-            metadata={"文件大小": format_bytes(cache.stat().st_size)},
+            metadata={"尺寸": image_dimensions(cache), "文件大小": format_bytes(cache.stat().st_size)},
         )

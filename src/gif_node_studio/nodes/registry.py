@@ -14,7 +14,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from .analysis_nodes import GifAnalysisNode, IcoAnalysisNode, PaletteViewNode, ResolutionViewNode
+from .analysis_nodes import (
+    ArtifactMetricsNode,
+    GifAnalysisNode,
+    IcoAnalysisNode,
+    PaletteViewNode,
+    ResolutionViewNode,
+)
 from .channel_nodes import AlphaMergeNode, AlphaSplitNode, ChannelMergeNode, ChannelSplitNode
 from .definitions import NodeDefinition
 from .export_nodes import (
@@ -51,6 +57,7 @@ from .process_nodes import (
     GrayscaleNode,
     HueSaturationNode,
     InvertNode,
+    LevelsNode,
     PercentScaleNode,
     RotateNode,
     SaturationNode,
@@ -58,9 +65,14 @@ from .process_nodes import (
     SuperKeyNode,
 )
 from .sequence_nodes import (
+    EdgeSmoothNode,
     FrameFreezeNode,
+    HalftoneNode,
     LengthAlignNode,
+    MedianFilterNode,
+    MorphCleanNode,
     PingPongNode,
+    PixelUpscaleNode,
     ResolutionAlignNode,
     SamplingNode,
     SequenceAddNode,
@@ -89,6 +101,7 @@ NODE_CLASSES: tuple[type[StudioNode], ...] = (
     GrayscaleNode,
     ContrastNode,
     InvertNode,
+    LevelsNode,
     SuperKeyNode,
     ColorKeyNode,
     RotateNode,
@@ -103,6 +116,11 @@ NODE_CLASSES: tuple[type[StudioNode], ...] = (
     SequenceRazorNode,
     ResolutionAlignNode,
     LengthAlignNode,
+    EdgeSmoothNode,
+    MedianFilterNode,
+    MorphCleanNode,
+    PixelUpscaleNode,
+    HalftoneNode,
     IconComposeNode,
     GifExportNode,
     GifExportFfmpegNode,
@@ -125,6 +143,7 @@ NODE_CLASSES: tuple[type[StudioNode], ...] = (
     ResolutionViewNode,
     GifAnalysisNode,
     IcoAnalysisNode,
+    ArtifactMetricsNode,
 )
 
 # 派生缓存：声明只存在于实例上（GBT43504/TestModule 式 super().__init__ 注入），

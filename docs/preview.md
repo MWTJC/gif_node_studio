@@ -84,16 +84,65 @@
 - UI 在步骤成功/单节点成功后，若结果为 `SequenceArtifact`，
   调用 `panel.set_sequence_frames(result.frames)` 喂入帧路径；拖动滑条即时切换预览帧。
 
+## 逐帧查看判据与产物播放口径（[决策 #144](decisions/141-150.md#d144)）
+
+- **判据**：序列型节点默认 `panel=PanelSpec(scrub_frames=True)`（预览区下方帧滑条）；豁免只有
+  两类，且必须在节点 docstring 的「组件」行写明原因：① **产物本身可播放**（用播放代替滑条，
+  且必须播放**真实产物**）；② **接管控件占据预览区**且参数在序列上逐帧同构（首帧锚定，
+  如画面裁剪的归一化 `CropSpec`）。豁免与待补清单见决策 #144 的登记表。
+- **产物播放（已落地，决策 #144）**：可播放产物的导出节点声明 `PREVIEW_PRODUCT = True`
+  （GIF 合成 ×3 / GIF 优化 / WebP / APNG），`ui` 把产物路径写入 `preview_output`，预览框
+  播放**真实产物**而非上游首帧：
+  - GIF → 自定义 Wand 播放器（透明索引）或 `QMovie`；
+  - WebP → `QMovie`（Qt 内置 `qwebp` 插件，实测含 alpha、可循环）；
+  - APNG → `ApngPreviewPlayer`（Qt 不认 `acTL` 动画块，Pillow 逐帧解码 + `QTimer`；
+    同样受窗口最小化/失焦暂停，帧数/内存沿用 GIF 预览预算）；
+  - `png_export` 产物是帧目录（不可播放），**不标注**，改用帧滑条；其结果形态（文件元组）
+    由 `ui._frame_path_list` 归一为帧列表，喂滑条的同时也补上了此前缺失的首帧预览。
+- `sequence_crop` 明确**不加**帧滑条：接管控件占预览区、裁剪框逐帧同构，且帧滑条的帧源是
+  运行结果（对裁剪节点即已裁剪帧），接上会语义反向。
+
+## 播放开销与暂停机制（[决策 #145](decisions/141-150.md#d145)）
+
+- 暂停只由**窗口状态**驱动（`MainWindow._apply_visibility_pause`：最小化/隐藏 → 暂停播放并冻结
+  画布重绘；可见但失焦 → 只暂停播放）。**没有视野剔除**：滚出视野或缩小视图（代理模式只隐藏
+  内嵌控件）的产物照常解码，只是不再绘制——实测换帧数与可见时相同、paint 归零。
+- 多播放器之间**无统一帧钟**：各自定时器按自身帧延迟出帧，一次换帧一次 `set_content()` →
+  `update()`。实测 1→8 个播放器时每个仍 ≈21 帧/秒（标称 25，定时器粒度量化所致，非解码负担），
+  互不拖慢，刷新总量 = 各播放器帧率之和。
+
+## 预览出帧上限与状态栏读数（[决策 #146](decisions/141-150.md#d146)）
+
+- **限帧 = skip（丢帧保时长）**：设置页「预览帧速」开关 + 10–240 fps（默认关闭、默认 30）。
+  开启后 `GifPreviewPlayer` / `ApngPreviewPlayer` 改用 `PreciseTimer` 固定周期出拍，按原生帧
+  延迟累积决定本拍落第几帧——**序列总时长与原生一致**，只是少画（少解码）若干帧。Coarse 定时器
+  会把 33ms 量化成 46.9ms（实测「限 30fps」变 21.3fps），故必须 Precise。
+- **QMovie 路径的保底**：`jumpToFrame` 只能 +1、GIF/WebP 解码是顺序的，跳帧省不了解码（实测
+  CPU 无收益），动画 WebP 也只有 Qt 的 qwebp 插件能播（PyAV 不支持）——所以这条路径**不能
+  skip**。上限低于素材原生帧速（5% 容差）时，预览退化为**静态首帧**；上限 ≥ 原生帧速时照常
+  播放。素材原生帧速：GIF 取块解析的逐帧延迟，动画 WebP 采样 8 帧 `nextFrameDelay()`。
+- **统一帧钟（决策 #147）**：限帧开启时，全部在播预览由**单一 `Precise` 定时器**按限帧速率出拍
+  （`nodes/preview_clock.py`）；每拍依次推进各预览，同一轮事件循环里的换帧被 Qt 合并成**一次**
+  画布合成。因此「每预览 ≤N fps、时长不变」与「界面每秒刷新 N 次」同时成立，且与预览个数无关
+  （实测 8 个预览：各自定时器 57.5 次/秒 → 统一帧钟 30.5 次/秒）。
+- **状态栏「渲染 N fps」**（常驻，每秒刷新一次）：口径 = 画布 viewport 的刷新次数，**按事件循环
+  批次合并**（真实场景一次换帧会触发两次局部重绘，逐次计数会把 30 读成 60）。tooltip 给出「预览框
+  绘制 / 换帧」次数作对照——限帧 30、3 个预览时典型值是「渲染 30 / 预览框绘制 90 / 换帧 90」。
+  窗口最小化/失焦暂停播放时读数标注「（已暂停）」。
+- **工作量不变的部分**：统一帧钟约束的是刷新次数与出帧密度，解码+绘制仍是各预览之和；要降总量
+  用 #145 的视野剔除或后续的全局帧预算。
+- **不影响导出**：限帧只作用于预览播放；导出帧速、抽帧/合成节点参数不变。
+
 ## UI 预览路径优先级
 
 ```
-node.preview_output（GIF 导出专用预览） → SequenceArtifact.frames[0] → MediaManifest.preview → MediaManifest.sources[0] → Path(.gif)
+node.preview_output（可播放产物：GIF / WebP / APNG） → SequenceArtifact.frames[0] → MediaManifest.preview → MediaManifest.sources[0] → Path(.gif)
 ```
 
 - 预览框固定为 **200×200（1:1）**，不随预览内容变化；显示内容大于预览框时保持纵横比缩小显示，小于等于预览框时原尺寸显示（`CheckerPreviewLabel` 适配模式，见下方 DPI 说明）。
-  两个例外：**图片1:1分辨率查看**（`res1to1_view`）与 **GIF 合成节点**（`gif_export`）通过
-  `PanelSpec(preview_1to1=True)` 按素材原始像素尺寸 1:1 显示（GIF 合成产物
-  `preview.gif` 的预览框 = 动画画布尺寸，不缩放；见[关键决策 #40](decisions/31-40.md#d40)）。
+  例外：**图片1:1分辨率查看**（`res1to1_view`）与**可播放产物的导出节点**（GIF 合成 ×3 /
+  GIF 优化 / WebP / APNG，见决策 #144）通过 `PanelSpec(preview_1to1=True)` 按素材原始像素
+  尺寸 1:1 显示（产物预览框 = 动画画布尺寸，不缩放；见[关键决策 #40](decisions/31-40.md#d40)）。
 
 ## 预览框高 DPI 像素校正（[决策 #86](decisions/81-90.md#d86)）
 

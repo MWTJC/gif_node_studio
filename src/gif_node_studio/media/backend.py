@@ -126,6 +126,9 @@ class MediaBackend:
     def grayscale_sequence(self, artifact: SequenceArtifact):
         return backend_color.grayscale_sequence(self.workspace, self._progress, artifact)
 
+    def levels_sequence(self, artifact: SequenceArtifact, *, in_black: int=0, in_white: int=255, gamma: float=1.0, out_black: int=0, out_white: int=255):
+        return backend_color.levels_sequence(self.workspace, self._progress, artifact, in_black=in_black, in_white=in_white, gamma=gamma, out_black=out_black, out_white=out_white)
+
     def contrast_sequence(self, artifact: SequenceArtifact, amount: float):
         return backend_color.contrast_sequence(self.workspace, self._progress, artifact, amount)
 
@@ -202,6 +205,22 @@ class MediaBackend:
     def gradient_sequence(self, width: int, height: int, frames: int, start_color: str, end_color: str, angle: float=0.0):
         return backend_sequence.gradient_sequence(self.workspace, self._progress, width, height, frames, start_color, end_color, angle)
 
+    # 空间域清理（决策 #136–#139）：保边平滑 / 中值去斑 / 形态学清理 / 像素放大。
+    def edge_smooth_sequence(self, artifact: SequenceArtifact, *, radius: int=2, algorithm: str='kuwahara'):
+        return backend_sequence.edge_smooth_sequence(self.workspace, self.imagemagick, self._progress, artifact, radius=radius, algorithm=algorithm)
+
+    def median_filter_sequence(self, artifact: SequenceArtifact, *, size: int=3, algorithm: str='median'):
+        return backend_sequence.median_filter_sequence(self.workspace, self.imagemagick, self._progress, artifact, size=size, algorithm=algorithm)
+
+    def morphology_sequence(self, artifact: SequenceArtifact, *, mode: str='lulu', radius: int=1):
+        return backend_sequence.morphology_sequence(self.workspace, self.imagemagick, self._progress, artifact, mode=mode, radius=radius)
+
+    def pixel_upscale_sequence(self, artifact: SequenceArtifact, *, factor: int=2, filter: str='xbr'):
+        return backend_sequence.pixel_upscale_sequence(self.workspace, self._progress, artifact, factor=factor, filter=filter)
+
+    def halftone_sequence(self, artifact: SequenceArtifact, *, cell: int=8, shape: str='circle', angle: int=0):
+        return backend_sequence.halftone_sequence(self.workspace, self._progress, artifact, cell=cell, shape=shape, angle=angle)
+
     # ===== 区段 4（转发至 backend_export，决策 #120） =====
     def icon_compose(self, inputs: list[SequenceArtifact], auto_grade: bool=True):
         return backend_export.icon_compose(self.workspace, self._progress, inputs, auto_grade)
@@ -261,6 +280,9 @@ class MediaBackend:
 
     def analysis_ico_montage(self, manifest: MediaManifest | None=None):
         return backend_analysis.analysis_ico_montage(self.workspace, manifest)
+
+    def artifact_metrics(self, manifest: MediaManifest | None=None, sequence: SequenceArtifact | None=None, *, samples: int=8, heatmap: bool=False):
+        return backend_analysis.artifact_metrics(self.workspace, self.imagemagick, self._progress, manifest, sequence, samples=samples, heatmap=heatmap)
 
     # ===== 区段 7（转发至 backend_cache，决策 #120） =====
     def clear_workspace(self):

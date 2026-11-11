@@ -11,6 +11,7 @@ from .definitions import (
     PortType,
 )
 from .icon_resource import category_icon
+from .metadata_spec import MetadataSpec, MetaField
 from .parameter_panel import ParameterPanel
 from .sequence_nodes import SequenceNode
 
@@ -23,6 +24,15 @@ class ChannelSplitNode(SequenceNode):
     """
 
     NODE_NAME = "RGBA 通道分离"
+
+    # 多输出：默认摘要按端口名逐通道展开，故基础字段 = 4 端口 × (帧数/尺寸)（决策 #142）。
+    METADATA_SPEC = MetadataSpec((
+        MetaField("R 帧数"), MetaField("R 尺寸"),
+        MetaField("G 帧数"), MetaField("G 尺寸"),
+        MetaField("B 帧数"), MetaField("B 尺寸"),
+        MetaField("A 帧数"), MetaField("A 尺寸"),
+    ))
+
     ico_center = -0.15
     def __init__(self):
         super().__init__(

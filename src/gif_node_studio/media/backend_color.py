@@ -244,6 +244,53 @@ def invert_sequence(workspace, progress, artifact: SequenceArtifact):
     paths = _parallel_pil_export(progress, total, output, "反相", process)
     return SequenceArtifact(paths, artifact.width, artifact.height, artifact.has_alpha, str(output))
 
+def levels_sequence(workspace, progress, artifact: SequenceArtifact, *, in_black: int=0, in_white: int=255, gamma: float=1.0, out_black: int=0, out_white: int=255):
+    """色阶（序列 → 序列）：按输入黑白场 + 伽马 + 输出范围重映射明暗（逐像素 LUT）。
+
+    - ``in_black`` / ``in_white``（0–255）：输入色阶的黑场/白场——比黑场暗的像素
+      一律压成纯黑、比白场亮的一律提成纯白，两者之间线性重映射到 0..255。这一步
+      就是「曲线两端加台阶」：把接近纯白/纯黑的浅灰直接吸到两端，避免生成极浅的
+      小点（PCB 半调/量化流程里这类点低于工艺极限、做不出来）；
+    - ``gamma``（0.1–9.9，默认 1.0）：中间调曲线 ``y = x ** (1 / gamma)``——>1
+      提亮中间调、<1 压暗中间调（PS/GIMP 色阶同一约定）；
+    - ``out_black`` / ``out_white``（0–255）：输出区间，把上面结果压进该范围
+      （默认 0/255 = 不压缩；两者互换即整体反相）。
+
+    实现 = 256 级查找表 + numpy 逐帧查表（等价 PIL ``Image.point``；项目约定
+    逐像素运算走 numpy 向量化）。只作用于 RGB，Alpha 原样保留；帧数、尺寸不变。
+    """
+    in_black, in_white = int(in_black), int(in_white)
+    out_black, out_white = int(out_black), int(out_white)
+    gamma = float(gamma)
+    for name, value in (
+        ("输入黑场", in_black), ("输入白场", in_white),
+        ("输出黑场", out_black), ("输出白场", out_white),
+    ):
+        if not 0 <= value <= 255:
+            raise ValueError(f"色阶：{name}必须在 0–255 之间（当前 {value}）")
+    if in_black >= in_white:
+        raise ValueError(f"色阶：输入黑场必须小于输入白场（当前 {in_black} / {in_white}）")
+    if not 0.1 <= gamma <= 9.9:
+        raise ValueError(f"色阶：伽马必须在 0.1–9.9 之间（当前 {gamma:g}）")
+
+    # 256 级 LUT：输入区间截断 → 伽马 → 输出区间，四舍五入后钳到 0..255。
+    levels = np.arange(256, dtype=np.float64)
+    normalized = np.clip((levels - in_black) / (in_white - in_black), 0.0, 1.0)
+    curved = np.power(normalized, 1.0 / gamma)
+    lut = np.clip(np.round(out_black + curved * (out_white - out_black)), 0, 255).astype(np.uint8)
+    output = _job_dir(workspace, "levels")
+    total = len(artifact.frames)
+
+    def process(index: int) -> Image.Image:
+        with Image.open(artifact.frames[index]) as image:
+            rgba = np.asarray(image.convert("RGBA"))
+        out = rgba.copy()
+        out[..., :3] = lut[rgba[..., :3]]
+        return Image.fromarray(out, "RGBA")
+
+    paths = _parallel_pil_export(progress, total, output, "色阶", process)
+    return SequenceArtifact(paths, artifact.width, artifact.height, artifact.has_alpha, str(output))
+
 def _rgb_to_hsl(rgb):
     """RGB（float64, ...,3, 0..1）→ HSL（...,3：h 0..360、s/l 0..1）。"""
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]

@@ -9,6 +9,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import qtawesome as qta
 
 from ..media.media_info import format_bytes, gif_playback_info
+from ..ui.fps_meter import note_frame
 from ..ui.settings_manager import ALPHA_BG, ALPHA_BG_CHECKER
 from .definitions import (
     BoolParam,
@@ -20,7 +21,7 @@ from .definitions import (
     ParamDefinition,
     TakeoverParam,
 )
-from .preview_widgets import CheckerPreviewLabel, GifPreviewPlayer
+from .preview_widgets import ApngPreviewPlayer, CheckerPreviewLabel, GifPreviewPlayer
 from .widgets import ColorPickerWidget, FilePathWidget, SliderSpinBox, StudioComboBox
 
 class ParameterPanel(QtWidgets.QWidget):
@@ -37,16 +38,13 @@ class ParameterPanel(QtWidgets.QWidget):
     # 自定义 GIF 播放器（GifPreviewPlayer）的适用范围：带透明索引的小尺寸 GIF。
     # 估算 RGBA 内存 = 帧数 × 宽 × 高 × 4，超过预算或帧数过多时回退 QMovie
     # 流式播放（big.gif 1185 帧 956×488 估算 ≈2.2GB，coalesce ≈8.7s，不可接受）。
+    # 决策 #147 复核：**不要为了"提速"调高**——Wand 每帧要 C 级导出全 RGBA
+    # （320×240 0.83ms、956×488 8.5ms），而 QMovie 直接给 QPixmap（0.30ms）；
+    # 调高只会让更大素材从快路径落到慢路径，仅换来透明度正确的覆盖面对齐。
     GIF_PREVIEW_MEMORY_BUDGET = 64 * 1024 * 1024
     GIF_PREVIEW_MAX_FRAMES = 512
     RUN_BUTTON_ICON = "fa6s.play"          # 节点「运行」键图标（空闲：播放）
     STOP_BUTTON_ICON = "fa6s.stop" # 节点「运行」键图标（运行中：可中断）
-    STATUS_STYLE = {
-        "dirty": ("待运行", "#ffbd59", (125, 82, 24)),
-        "running": ("运行", "#62b4ff", (38, 88, 133)),
-        "clean": ("完成", "#68df91", (31, 108, 62)),
-        "error": ("错误", "#ff6868", (135, 38, 45)),
-    }
 
     def __init__(self, definition: NodeDefinition, parent=None):
         """面板完全由节点声明驱动（决策 #109），不再接收构造标志：
@@ -63,6 +61,12 @@ class ParameterPanel(QtWidgets.QWidget):
         # 设置管理器：MainWindow._bind_node 注入（面板构造期尚不存在）；
         # 文件选择行（FilePathWidget）经 panel.settings 读/写「上次导入目录」记忆。
         self.settings = None
+        # 预览出帧上限（决策 #146）：MainWindow 按设置注入（None = 不限）；
+        # 上一次喂入的预览路径保留下来，供上限变更时就地重建播放。
+        self._fps_limit: int | None = None
+        self._preview_path: str | None = None
+        # QMovie 路径在限帧命中时只显示首帧（见 _should_freeze_movie）。
+        self._movie_static_capped = False
         spec = definition.panel
         self._scrub_frames = spec.scrub_frames
         self._preview_1to1 = spec.preview_1to1
@@ -131,10 +135,9 @@ class ParameterPanel(QtWidgets.QWidget):
         self.set_run_button_state(False)
         self.export_button = QtWidgets.QPushButton("导出…", self)
         self.export_button.setVisible(export_enabled)
-        self.status = QtWidgets.QToolButton()
+        # 状态不再用文字按钮：改由节点右上角角标表达（status_badge.py）。
         actions = QtWidgets.QHBoxLayout()
         actions.addWidget(self.run_button)
-        actions.addWidget(self.status)
         form.addRow(self.export_button)
         form.addRow(actions)
         form.addRow(self.node_info)
@@ -332,11 +335,8 @@ class ParameterPanel(QtWidgets.QWidget):
                 self.preview.set_bg_color(None)
 
     def set_status(self, state: str, detail: str = "") -> None:
-        text, color, _ = self.STATUS_STYLE[state]
-        self.status.setText(text + (f" {detail}" if detail else ""))
-        self.status.setStyleSheet(f"background:{color};color:#111;font-weight:bold")
-        # 运行键外观跟随节点状态：运行中变为红色停止图标（可中断），
-        # 空闲恢复播放图标。图标本身由 qtawesome 提供，不再使用 Qt 内置箭头。
+        # 状态文字/角标由节点侧处理（StudioNode.set_status → 角标）；
+        # 面板只负责运行键外观：运行中变红停止图标（可中断），空闲恢复播放。
         self.set_run_button_state(state == "running")
 
     def set_run_button_state(self, running: bool) -> None:
@@ -390,6 +390,7 @@ class ParameterPanel(QtWidgets.QWidget):
             # ``release_preview``（节点删除/移除）与 ``set_frames([])``
             # （上游无帧）承担。
             return
+        self._preview_path = str(path) if path else None
         self.release_preview()
         if not path:
             return
@@ -402,9 +403,24 @@ class ParameterPanel(QtWidgets.QWidget):
                 if param.data_source == "first_frame":
                     self._takeover_widgets[param.name].set_image(path)
             return
-        if str(path).lower().endswith(".gif"):
-            # 带透明的 GIF 走自定义播放器（透明区域与序列预览一致）；其余回退 QMovie。
-            info = gif_playback_info(str(path))
+        lower = str(path).lower()
+        if lower.endswith(".apng"):
+            # APNG 产物：Qt 只解首帧（不支持 acTL 动画）→ Pillow 播放器（决策 #144
+            # 「路线 a」）；超预算/解码失败时回退下面的静态首帧分支。
+            player = ApngPreviewPlayer(
+                self,
+                max_frames=self.GIF_PREVIEW_MAX_FRAMES,
+                memory_budget=self.GIF_PREVIEW_MEMORY_BUDGET,
+            )
+            player.set_fps_limit(self._fps_limit)
+            if player.start(str(path), self._on_gif_frame):
+                self._apng_player = player
+                return
+            player.deleteLater()
+        if lower.endswith((".gif", ".webp")):
+            # 带透明的 GIF 走自定义播放器（透明区域与序列预览一致）；其余 GIF 与
+            # 动画 WebP（Qt 6 内置 qwebp 插件实测可播、含 alpha，决策 #144）走 QMovie。
+            info = gif_playback_info(str(path)) if lower.endswith(".gif") else None
             if self._should_use_custom_gif_player(info) and self._start_custom_gif_player(str(path), info):
                 return
             movie = QtGui.QMovie(str(path))
@@ -414,9 +430,13 @@ class ParameterPanel(QtWidgets.QWidget):
                 # → set_content，由预览标签统一做 DPR 感知绘制/定框。
                 self._movie = movie
                 movie.frameChanged.connect(self._on_movie_frame)
+                # 限帧命中且本路径无法丢帧（jumpToFrame 只能 +1，见决策 #146
+                # 实测）→ 只显示首帧：首帧的播放时长与原生一致，代价归零。
+                self._movie_static_capped = self._should_freeze_movie(info, movie)
                 movie.jumpToFrame(0)
                 self._on_movie_frame(0)
-                movie.start()
+                if not self._movie_static_capped:
+                    movie.start()
                 return
         pixmap = QtGui.QPixmap(str(path))
         if pixmap.isNull():
@@ -438,12 +458,75 @@ class ParameterPanel(QtWidgets.QWidget):
     def _start_custom_gif_player(self, path: str, info: dict) -> bool:
         """启动 Wand 解码的自定义 GIF 播放器；失败返回 False（调用方回退 QMovie）。"""
         player = GifPreviewPlayer(self)
+        player.set_fps_limit(self._fps_limit)
         loop = info["loop"] if info["loop"] is not None else 1  # 未声明循环 → 播放一次
         if not player.start(path, info["durations_ms"], loop, self._on_gif_frame):
             player.deleteLater()
             return False
         self._gif_player = player
         return True
+
+    def _movie_native_fps(self, info: dict | None, movie) -> float | None:
+        """估算 QMovie 路径素材的原生帧速（fps）；无法判定返回 None。
+
+        - GIF：块解析已给出逐帧延迟（``info["durations_ms"]``，不解码像素）；
+        - 动画 WebP 等无块解析的格式：单步采样前 8 帧的 ``nextFrameDelay()``
+          求均值（QMovie 该值即当前帧显示时长），采样后跳回首帧。
+        """
+        durations = [d for d in ((info or {}).get("durations_ms") or []) if d and d > 0]
+        if durations:
+            return 1000.0 / (sum(durations) / len(durations))
+        if not self._fps_limit:
+            return None
+        delays: list[int] = []
+        current = max(0, movie.currentFrameNumber())
+        for _ in range(min(8, max(0, movie.frameCount() - 1))):
+            if not movie.jumpToFrame(current + 1):
+                break
+            current += 1
+            delay = movie.nextFrameDelay()
+            if delay and delay > 0:
+                delays.append(int(delay))
+        movie.jumpToFrame(0)
+        if not delays:
+            return None
+        return 1000.0 / (sum(delays) / len(delays))
+
+    def _should_freeze_movie(self, info: dict | None, movie) -> bool:
+        """QMovie 路径的限帧判定：命中上限时只能「只显示首帧」。
+
+        QMovie 的 ``jumpToFrame`` 只能 +1（实测跳 2 帧以上返回 False），而
+        GIF/WebP 解码是顺序的——跳帧省不了解码，实测 CPU 反而略升（决策
+        #146）。因此本路径在**上限低于原生帧速**时退化为静态首帧：时间尺度
+        取「首帧展示时长 = 原生帧延迟」，代价归零。上限 ≥ 原生帧速（含 5%
+        容差，帧延迟本身有量化误差）时按原生播放。
+        """
+        if not self._fps_limit:
+            return False
+        native = self._movie_native_fps(info, movie)
+        return native is not None and native > self._fps_limit * 1.05
+
+    def set_preview_fps_limit(self, fps: int | None) -> None:
+        """注入预览出帧上限（fps；None = 不限），正在播放的预览就地切驱动源（决策 #146/#147）。
+
+        两个播放器可原地换驱动（统一帧钟 ↔ 自身定时器），无需重建——重建会重新
+        coalesce，大预览代价明显。只有 QMovie 路径要重新判定「是否退化为首帧」，
+        那种情况按保存的预览路径重建一次（设置对话框是模态的，此时播放本就暂停，
+        重建无感）。
+        """
+        fps = int(fps) if fps else None
+        if fps == self._fps_limit:
+            return
+        self._fps_limit = fps
+        for name in ("_gif_player", "_apng_player"):
+            player = getattr(self, name, None)
+            if player is not None:
+                try:
+                    player.set_fps_limit(fps)
+                except RuntimeError:
+                    continue
+        if getattr(self, "_movie", None) is not None and self._preview_path and not self._takeovers:
+            self.show_preview(self._preview_path)
 
     def _on_movie_frame(self, _frame: int) -> None:
         """QMovie 回退路径每帧回调：currentPixmap → set_content（标签统一定框/绘制）。"""
@@ -452,6 +535,7 @@ class ParameterPanel(QtWidgets.QWidget):
             return
         pixmap = movie.currentPixmap()
         if pixmap is not None and not pixmap.isNull():
+            note_frame()
             self.preview.set_content(pixmap)
 
     def _on_gif_frame(self, raw: bytes, width: int, height: int) -> None:
@@ -459,6 +543,7 @@ class ParameterPanel(QtWidgets.QWidget):
         image = QtGui.QImage(raw, width, height, width * 4, QtGui.QImage.Format.Format_RGBA8888)
         if image.isNull():
             return
+        note_frame()
         image = image.copy()  # 与原始 bytes 缓冲解耦
         pixmap = QtGui.QPixmap.fromImage(image)
         # 1:1/适配统一由标签处理：set_content 在帧尺寸不变时不重排节点
@@ -480,12 +565,18 @@ class ParameterPanel(QtWidgets.QWidget):
             player.stop()
             player.deleteLater()
             self._gif_player = None
+        apng = getattr(self, "_apng_player", None)
+        if apng is not None:
+            apng.stop()
+            apng.deleteLater()
+            self._apng_player = None
         movie = getattr(self, "_movie", None)
         if movie is not None:
             movie.stop()
             movie.setFileName("")
             movie.deleteLater()
             self._movie = None
+        self._movie_static_capped = False
         # 清空内容并复位 1:1 框尺寸（标签内静默复位，不触发重排）。
         self.preview.clear_content()
 
@@ -521,8 +612,15 @@ class ParameterPanel(QtWidgets.QWidget):
                 player.resume()
             else:
                 player.pause()
+        apng = getattr(self, "_apng_player", None)
+        if apng is not None:
+            if playing:
+                apng.resume()
+            else:
+                apng.pause()
         movie = getattr(self, "_movie", None)
-        if movie is not None:
+        if movie is not None and not self._movie_static_capped:
+            # 首帧保底（决策 #146）的静态电影不参与播放/暂停：它从未 start()。
             movie.setPaused(not playing)
 
     # --- 接管组件（TakeoverParam）：外部数据源能力探测与喂入 ---

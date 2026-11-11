@@ -19,7 +19,12 @@
   * 文件对话框起始目录记忆（``dialog/export_dir`` / ``dialog/import_dir``）：
     导出保存框记住上次导出目录、输入/打开文件行记住上次导入目录，
     下次对话框直接落到记忆目录（不记忆则回落程序当前目录）。与连线样式/
-    背景网格同类——**不在设置界面显示**，仅存取（见关键决策 #133）。
+    背景网格同类——**不在设置界面显示**，仅存取（见关键决策 #133）；
+  * 预览出帧上限（``preview/fps_limit_enabled`` + ``preview/fps_limit``）：
+    设置界面可调，默认**关闭**、值默认 30 fps（钳制 10–240）。开启后预览
+    播放器按「丢帧保时长」出帧；QMovie 路径（大 GIF / 动画 WebP）无法丢帧，
+    命中上限时只显示首帧（见关键决策 #146）。变更即时生效（对话框发
+    ``preview_fps_changed``，主窗口下发到所有节点面板）。
 - ``SettingsDialog``：固定尺寸对话框，QTabWidget 切换「设置」/「关于」页；
   「关于」页为 QScrollArea（内容超高时纵向滚动），头部应用图标 + 名称 +
   版本，后端小节带各自图标（``img_resource.qrc`` 编译资源）；
@@ -172,6 +177,15 @@ AUTOSAVE_MIN_MIN = 0
 AUTOSAVE_MAX_MIN = 120
 DEFAULT_AUTOSAVE_INTERVAL_MIN = 10
 
+# 预览出帧上限（决策 #146）：开关默认关、值默认 30 fps，钳制到 [10, 240]。
+# 开启后预览播放器按「丢帧保时长」出帧（时间尺度与原生一致，只少画帧）；
+# 走 QMovie 的素材（非透明 GIF / 超预算 GIF / 动画 WebP）解不了丢帧，命中
+# 上限时只显示首帧。导出帧速不受影响。
+PREVIEW_FPS_MIN = 10
+PREVIEW_FPS_MAX = 240
+DEFAULT_PREVIEW_FPS = 30
+DEFAULT_PREVIEW_FPS_ENABLED = False
+
 # 兼容别名：均由选项组派生（非平行定义）——组内改名时这里在导入期抛 KeyError，
 # 立刻暴露漂移而不是静默沿用旧值。
 THEME_LIGHT = THEME.value_of("浅色")
@@ -222,6 +236,11 @@ class SettingsManager:
     AUTOSAVE_MIN_MIN = AUTOSAVE_MIN_MIN
     AUTOSAVE_MAX_MIN = AUTOSAVE_MAX_MIN
     DEFAULT_AUTOSAVE_INTERVAL_MIN = DEFAULT_AUTOSAVE_INTERVAL_MIN
+    # 预览出帧上限默认值（模块级常量；类属性镜像）。
+    PREVIEW_FPS_MIN = PREVIEW_FPS_MIN
+    PREVIEW_FPS_MAX = PREVIEW_FPS_MAX
+    DEFAULT_PREVIEW_FPS = DEFAULT_PREVIEW_FPS
+    DEFAULT_PREVIEW_FPS_ENABLED = DEFAULT_PREVIEW_FPS_ENABLED
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path is not None else user_data_dir() / "settings.ini"
@@ -334,6 +353,33 @@ class SettingsManager:
         """自动保存文件路径：与设置文件同目录（隔离到设置/测试注入的目录）。"""
         return self.path.parent / "autosave.json"
 
+    # --- 预览出帧上限（决策 #146：丢帧保时长；默认关闭、默认 30 fps） ---
+
+    def preview_fps_enabled(self) -> bool:
+        """预览出帧上限开关（默认关闭 = 保持原播放行为）。"""
+        value = self.get("preview/fps_limit_enabled", self.DEFAULT_PREVIEW_FPS_ENABLED)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+    def set_preview_fps_enabled(self, enabled: bool) -> None:
+        self.set("preview/fps_limit_enabled", "true" if enabled else "false")
+
+    def preview_fps_limit(self) -> int:
+        """预览出帧上限（fps），钳制到 ``[10, 240]``。"""
+        value = self._as_int(
+            self.get("preview/fps_limit", self.DEFAULT_PREVIEW_FPS), self.DEFAULT_PREVIEW_FPS
+        )
+        return max(self.PREVIEW_FPS_MIN, min(self.PREVIEW_FPS_MAX, value))
+
+    def set_preview_fps_limit(self, fps: int) -> None:
+        clamped = max(self.PREVIEW_FPS_MIN, min(self.PREVIEW_FPS_MAX, int(fps)))
+        self.set("preview/fps_limit", clamped)
+
+    def preview_fps_cap(self) -> int | None:
+        """生效的预览出帧上限：关闭时返回 ``None``（= 不限，调用方据此跳过限帧）。"""
+        return self.preview_fps_limit() if self.preview_fps_enabled() else None
+
     # --- 文件对话框起始目录记忆（导出保存框/导入打开框；设置界面不可见，
     # 与连线样式/背景网格同类——工具栏切换式自动保存，见决策 #133） ---
 
@@ -372,7 +418,7 @@ class SettingsManager:
 
     def reset(self) -> None:
         """恢复默认设置：深色主题（固定，决策 #90）、网格线背景、曲线连线样式、
-        棋盘格透明背景。"""
+        棋盘格透明背景、预览出帧上限关闭（30 fps）。"""
         # 主题固定为深色，无需重置（set_theme 已不再生效）。
         self.set_pipe_style(self.DEFAULT_PIPE_STYLE)
         self.set_grid_mode(self.DEFAULT_GRID_MODE)
@@ -382,6 +428,9 @@ class SettingsManager:
         self.set_cache_limit_mb(self.DEFAULT_CACHE_LIMIT_MB)
         # 自动保存：默认 10 分钟开启。
         self.set_autosave_interval_min(self.DEFAULT_AUTOSAVE_INTERVAL_MIN)
+        # 预览出帧上限：默认关闭 + 30 fps。
+        self.set_preview_fps_enabled(self.DEFAULT_PREVIEW_FPS_ENABLED)
+        self.set_preview_fps_limit(self.DEFAULT_PREVIEW_FPS)
         # 文件对话框目录记忆：重置后回到无记忆状态（'' → 对话框回落当前目录）。
         for key in ("dialog/export_dir", "dialog/import_dir"):
             self._settings.remove(key)
@@ -435,8 +484,11 @@ def apply_grid_mode(graph, mode: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _AboutScrollArea(QtWidgets.QScrollArea):
-    """关于页滚动区：内容按视口宽度换行后重算高度，超高时启用纵向滚动。
+class _WrappedPageScroll(QtWidgets.QScrollArea):
+    """设置页/关于页滚动区：内容按视口宽度换行后重算高度，超高时启用纵向滚动。
+
+    两页共用（决策 #146 起「设置」页也走滚动）：格式化行数增长后 440×580 的
+    固定对话框装不下，超出部分必须可滚动到达，而不是被裁掉。
 
     **必须配合 ``setWidgetResizable(False)`` 使用**：``widgetResizable=True``
     时 QScrollArea 在每次自身 resize 时把容器重新钳回视口尺寸（滚动条
@@ -498,11 +550,13 @@ def _about_label(text: str = "", *, selectable: bool = False) -> QtWidgets.QLabe
 class SettingsDialog(QtWidgets.QDialog):
     """设置对话框：固定尺寸；QTabWidget 切换「设置」/「关于」页。
 
-    - 「设置」页：颜色主题固定为深色（决策 #90，下拉置灰只读展示，不可
-      调整；暂无细化亮色主题的计划）、透明背景色、缓存管理（目录/上限/
-      实时用量）、自动保存间隔（分钟，0=关闭）、「重置设置」按钮（恢复
-      默认：深色主题、网格线背景、曲线连线样式、自动保存 10 分钟）；
-      连线样式/背景网格**不在此界面显示**（由工具栏切换并自动保存）。
+    - 「设置」页（QScrollArea 滚动，行数超出可滚动到达）：颜色主题固定为
+      深色（决策 #90，下拉置灰只读展示，不可调整；暂无细化亮色主题的
+      计划）、透明背景色、缓存管理（目录/上限/实时用量）、自动保存间隔
+      （分钟，0=关闭）、预览帧速限制（开关 + 10–240 fps，决策 #146）、
+      「重置设置」按钮（恢复默认：深色主题、网格线背景、曲线连线样式、
+      自动保存 10 分钟、预览帧速限制关闭 + 30 fps）；连线样式/背景网格
+      **不在此界面显示**（由工具栏切换并自动保存）。
     - 「关于」页：QScrollArea 滚动展示（内容超高时纵向滚动）——头部应用
       图标（``:/ico/app_icon.ico``）+ 应用名 + 版本，简介、技术栈，
       ImageMagick / gifsicle / gifski / pyav 后端小节（带各自图标与运行时
@@ -515,6 +569,9 @@ class SettingsDialog(QtWidgets.QDialog):
     # 透明背景色变更（str：green / magenta）——主窗口据此把新颜色应用到
     # 所有「图片1:1分辨率查看」节点的预览框背景。
     alpha_bg_changed = QtCore.Signal(str)
+    # 预览出帧上限变更（int fps / None = 不限，决策 #146）——主窗口据此把
+    # 上限下发到所有节点面板（含正在播放的）。
+    preview_fps_changed = QtCore.Signal(object)
 
     DIALOG_WIDTH = 440
     DIALOG_HEIGHT = 580
@@ -615,6 +672,33 @@ class SettingsDialog(QtWidgets.QDialog):
         autosave_hint.setStyleSheet("color:#909090;")
         form.addRow(autosave_hint)
 
+        # ---- 预览帧速限制（决策 #146）：开关 + 上限值（10–240 fps）----
+        # 默认关、默认 30：不改现状；开启后按「丢帧保时长」出帧（时间尺度
+        # 与原生一致，只是少画帧）。变更立即保存并即时下发到所有面板。
+        preview_fps_row = QtWidgets.QWidget()
+        preview_fps_layout = QtWidgets.QHBoxLayout(preview_fps_row)
+        preview_fps_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_fps_enabled = QtWidgets.QCheckBox("启用")
+        self.preview_fps_enabled.setChecked(settings.preview_fps_enabled())
+        self.preview_fps_spin = QtWidgets.QSpinBox()
+        self.preview_fps_spin.setRange(settings.PREVIEW_FPS_MIN, settings.PREVIEW_FPS_MAX)
+        self.preview_fps_spin.setSuffix(" fps")
+        self.preview_fps_spin.setValue(settings.preview_fps_limit())
+        self.preview_fps_spin.setEnabled(settings.preview_fps_enabled())
+        preview_fps_layout.addWidget(self.preview_fps_enabled)
+        preview_fps_layout.addWidget(self.preview_fps_spin, 1)
+        form.addRow("预览帧速", preview_fps_row)
+        self.preview_fps_enabled.toggled.connect(self._on_preview_fps_enabled)
+        self.preview_fps_spin.valueChanged.connect(self._on_preview_fps_value)
+        preview_fps_hint = QtWidgets.QLabel(
+            "开启后每个预览按上限丢帧播放（保持原时长），多个预览在同一拍换帧、"
+            "界面合计每秒刷新 N 次（状态栏读数即为该值）；无法丢帧的播放路径"
+            "（大 GIF / 动画 WebP）超过上限时只显示首帧。不影响导出帧速。"
+        )
+        preview_fps_hint.setWordWrap(True)
+        preview_fps_hint.setStyleSheet("color:#909090;")
+        form.addRow(preview_fps_hint)
+
         hint = QtWidgets.QLabel("「连线样式」「背景网格」由工具栏按钮切换，变更后自动保存到设置。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#909090;")
@@ -631,17 +715,17 @@ class SettingsDialog(QtWidgets.QDialog):
                 QtWidgets.QSizePolicy.Policy.Expanding,
             )
         )
-        tabs.addTab(settings_page, "设置")
+        tabs.addTab(self._scroll_page(settings_page), "设置")
 
-        # ---- 关于页（_AboutScrollArea：内容超高时纵向滚动 + 按视口宽钉住内容宽度）----
+        # ---- 关于页（_WrappedPageScroll：内容超高时纵向滚动 + 按视口宽钉住内容宽度）----
         # 横向溢出根因：word-wrap 标签（长路径无空格）把 minimumSizeHint 撑到
         # 自然宽度（实测 872px > 对话框 440px），QScrollArea/widgetResizable
         # 无法把容器缩到视口以下，关于页整体被撑宽——正文标签一律走
         # _about_label（横向 Ignored 策略，见其 docstring）。
         # widgetResizable 必须为 False：True 时 QScrollArea 会把容器重新钳回
-        # 视口尺寸（滚动条出现/消失反馈循环），覆盖掉 _AboutScrollArea 按真实
+        # 视口尺寸（滚动条出现/消失反馈循环），覆盖掉 _WrappedPageScroll 按真实
         # 换行内容高度回写的容器高度，内容被裁剪且无滚动条（实测）。
-        about_page = _AboutScrollArea()
+        about_page = _WrappedPageScroll()
         about_page.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         about_page.setWidgetResizable(False)
         about_page.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -793,6 +877,20 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addLayout(close_row)
 
     @staticmethod
+    def _scroll_page(page: QtWidgets.QWidget) -> "_WrappedPageScroll":
+        """把一页内容包进滚动区（固定对话框装不下时可滚动到达）。
+
+        三个 setter 与关于页一致：``widgetResizable=False``（见
+        ``_WrappedPageScroll`` 说明）、横向滚动条常关（宽度钉在视口）、无边框。
+        """
+        scroll = _WrappedPageScroll()
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidgetResizable(False)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        return scroll
+
+    @staticmethod
     def _version() -> str:
         try:
             from .. import version_info
@@ -911,6 +1009,17 @@ class SettingsDialog(QtWidgets.QDialog):
         """自动保存间隔变更：立即保存（钳制到合法范围后落盘）。"""
         self.settings.set_autosave_interval_min(minutes)
 
+    def _on_preview_fps_enabled(self, enabled: bool) -> None:
+        """预览帧速限制开关：立即保存并即时下发（值输入框随开关启用）。"""
+        self.preview_fps_spin.setEnabled(enabled)
+        self.settings.set_preview_fps_enabled(enabled)
+        self.preview_fps_changed.emit(self.settings.preview_fps_cap())
+
+    def _on_preview_fps_value(self, fps: int) -> None:
+        """预览帧速上限变更：立即保存（钳制到 10–240 后落盘）并即时下发。"""
+        self.settings.set_preview_fps_limit(fps)
+        self.preview_fps_changed.emit(self.settings.preview_fps_cap())
+
     def _refresh_cache_usage(self) -> None:
         """刷新「当前缓存用量」标签：用量 / 上限（MB），附带占用百分比。"""
         limit_mb = self.settings.cache_limit_mb()
@@ -947,6 +1056,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cache_limit_spin.setValue(self.settings.cache_limit_mb())
         # 自动保存间隔同步回默认（经 valueChanged 自动保存）。
         self.autosave_interval_spin.setValue(self.settings.autosave_interval_min())
+        # 预览帧速限制同步回默认（关闭 + 30 fps；经信号自动保存/下发）。
+        self.preview_fps_enabled.setChecked(self.settings.preview_fps_enabled())
+        self.preview_fps_spin.setValue(self.settings.preview_fps_limit())
+        self.preview_fps_spin.setEnabled(self.settings.preview_fps_enabled())
+        self.preview_fps_changed.emit(self.settings.preview_fps_cap())
         self.reset_requested.emit()
 
     @staticmethod

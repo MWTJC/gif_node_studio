@@ -74,6 +74,11 @@ class 某Node(SequenceNode):   # 族基类只提供 require_input/sequence 校�
         return backend.<fn>(cls.sequence(inputs), ...)
 ```
 
+- **逐帧查看（[决策 #144](decisions/141-150.md#d144)）**：序列型节点默认
+  `panel=PanelSpec(scrub_frames=True)`——预览区下方带帧滑条。只有两类可豁免，且必须在
+  本节点 docstring 的「组件」行写明原因：① **产物本身可播放**（用播放代替滑条，且必须
+  播放真实产物，不是上游首帧）；② **接管控件占据预览区**且本节点参数在整条序列上逐帧
+  同构（首帧锚定即可定参，如画面裁剪）。豁免清单与待补清单见决策 #144 的登记表。
 - 分类模块：输入 `input_nodes` / 预格式化+格式化 `manifest_nodes` /
   序列处理 `sequence_nodes` / 画面处理（原一般处理）`process_nodes` / 动效 `motion_nodes` /
   通道 `channel_nodes` / 输出 `export_nodes` / 分析 `analysis_nodes`。
@@ -87,6 +92,10 @@ class 某Node(SequenceNode):   # 族基类只提供 require_input/sequence 校�
 - 参数标签尽量带上单位风格（「容差 %」「羽化 %」「缩放百分比 %」）。
 - 类 docstring 必须按三行自述（node-conventions.md「docstring 自述约定」）：
   处理 / 参数 / 组件，复杂语义补在后方。
+- 输出元数据基础字段（决策 #142）：族基类已给默认（`SequenceNode` /
+  `ManifestNode`），**只有**产物形态与族默认不一致（如清单→序列）或仅展示关键信息时
+  才覆写 `METADATA_SPEC`（`nodes/metadata_spec.py`）；漏声明会被
+  `tests/test_metadata_spec_contract.py` 拦下。
 
 ### help 文案：面向使用者，别背文档（本次用户强制约定）
 

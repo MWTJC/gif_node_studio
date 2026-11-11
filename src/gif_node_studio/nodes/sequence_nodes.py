@@ -5,7 +5,21 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.domain import MultiOutput, SequenceArtifact
-from ..core.options import FREEZE_END, LENGTH_ALIGN_METHOD, RESAMPLE, SCALE_STRATEGY, STATIC_HOLD_REFERENCE
+from ..core.options import (
+    EDGE_SMOOTH_ALGORITHM,
+    FREEZE_END,
+    HALFTONE_ANGLE,
+    HALFTONE_SHAPE,
+    LENGTH_ALIGN_METHOD,
+    MEDIAN_FILTER_ALGORITHM,
+    MEDIAN_SIZE,
+    MORPH_MODE,
+    PIXEL_UPSCALE_FACTOR,
+    PIXEL_UPSCALE_FILTER,
+    RESAMPLE,
+    SCALE_STRATEGY,
+    STATIC_HOLD_REFERENCE,
+)
 from .definitions import (
     ChoiceParam,
     IntParam,
@@ -18,13 +32,17 @@ from .definitions import (
     TrimRangeParam,
 )
 from .icon_resource import category_icon
+from .metadata_spec import SEQUENCE_META, MetadataSpec, MetaField
 from .node_base import StudioNode
 from .parameter_panel import ParameterPanel
 from .razor_strip import make_razor_panel
 from .trim_strip import make_trim_panel
 
 class SequenceNode(StudioNode):
-    """序列族基类：只拥有共享的输入校验。"""
+    """序列族基类：只拥有共享的输入校验与输出元数据基础字段声明。"""
+
+    # 序列产物元数据恒为「帧数 / 尺寸 / 包含透明通道」（决策 #142）。
+    METADATA_SPEC = SEQUENCE_META
 
     @classmethod
     def sequence(cls, inputs: list[Any]) -> SequenceArtifact:
@@ -257,6 +275,12 @@ class SequenceRazorNode(SequenceNode):
 
     NODE_NAME = "序列剃刀"
 
+    # 多输出：默认摘要按端口名逐通道展开，故基础字段 = 段A/段B × (帧数/尺寸)（决策 #142）。
+    METADATA_SPEC = MetadataSpec((
+        MetaField("段A 帧数"), MetaField("段A 尺寸"),
+        MetaField("段B 帧数"), MetaField("段B 尺寸"),
+    ))
+
     def __init__(self):
         super().__init__(
             definition=NodeDefinition(
@@ -399,6 +423,248 @@ class LengthAlignNode(SequenceNode):
             a,
             b,
             method=LENGTH_ALIGN_METHOD.key_of(params["method"]),
+        )
+
+
+
+
+class EdgeSmoothNode(SequenceNode):
+    """保边平滑：去噪的同时不糊边（源侧振铃白边/软边清理）。
+
+    处理：backend.edge_smooth_sequence(radius=..., algorithm=...)
+    参数：radius（IntParam 滑条+数值框，1..6，默认 2）、algorithm（ChoiceParam 下拉）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    面向「录屏转出的 GIF」：源侧振铃白边/编码软边在颜色域调参救不回来，
+    必须先做空间域清理。实测 Kuwahara（默认）是唯一「去噪 + 边缘变锐」双赢的
+    算子；双边滤波在本类素材上去噪弱且成倍增加唯一色数（见决策 #136）。
+    """
+
+    NODE_NAME = "保边平滑"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "edge_smooth", self.NODE_NAME, NodeCategory.SEQUENCE,
+                icon=category_icon(NodeCategory.SEQUENCE, "mdi.blur"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    # 选项唯一源头：options.EDGE_SMOOTH_ALGORITHM
+                    ChoiceParam("algorithm", "算法", options=EDGE_SMOOTH_ALGORITHM),
+                    IntParam("radius", "半径", default=2, minimum=1, maximum=6),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "清理录屏/转码带来的杂色与白边，同时不把边缘糊掉（建议放在量化之前）：\n"
+                "算法：保边平滑方式（去噪与保边的取舍）\n"
+                "半径：越大清理越强（1–6，默认 2）\n"
+                "输出图片序列"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        return backend.edge_smooth_sequence(
+            cls.sequence(inputs),
+            radius=int(params["radius"]),
+            algorithm=EDGE_SMOOTH_ALGORITHM.key_of(params["algorithm"]),
+        )
+
+
+
+
+class MedianFilterNode(SequenceNode):
+    """中值去斑：用邻域中值替换像素，抹掉孤立杂点/抖动斑点。
+
+    处理：backend.median_filter_sequence(size=..., algorithm=...)
+    参数：algorithm（ChoiceParam 下拉）、size（ChoiceParam 下拉，3×3/5×5/7×7）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    窗口做成下拉而非 3–7 数值滑条：中值窗口必须为奇数，滑条会放出 4×4/6×6
+    这类非法取值。去斑（Despeckle）自带斑点判定、不取窗口（见决策 #137）。
+    """
+
+    NODE_NAME = "中值去斑"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "median_filter", self.NODE_NAME, NodeCategory.SEQUENCE,
+                icon=category_icon(NodeCategory.SEQUENCE, "mdi.grain"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    # 选项唯一源头：options.MEDIAN_FILTER_ALGORITHM / MEDIAN_SIZE
+                    ChoiceParam("algorithm", "算法", options=MEDIAN_FILTER_ALGORITHM),
+                    ChoiceParam("size", "窗口大小", options=MEDIAN_SIZE),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "用邻域中值替换像素，抹掉孤立杂点与抖动斑点（杂色重的素材再接颜色量化）：\n"
+                "算法：中值滤波按窗口取中值 / 去斑自动判定斑点\n"
+                "窗口大小：越大越干净、越容易糊掉细节（仅中值滤波生效）\n"
+                "输出图片序列"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        return backend.median_filter_sequence(
+            cls.sequence(inputs),
+            size=MEDIAN_SIZE.value_of(params["size"]),
+            algorithm=MEDIAN_FILTER_ALGORITHM.key_of(params["algorithm"]),
+        )
+
+
+
+
+class MorphCleanNode(SequenceNode):
+    """形态学清理：按结构元对亮/暗细节做开闭运算（去亮边/去暗边）。
+
+    处理：backend.morphology_sequence(mode=..., radius=...)
+    参数：mode（ChoiceParam 下拉）、radius（IntParam 滑条+数值框，1..3，默认 1）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    ⚠️ 方向是本节点最容易用错的一处：只开最能去掉亮边（白边，实测过冲 →≈0），
+    只闭会**反向加重**白边（6.38 → 8.93 级）；默认「先开后闭」最均衡
+    （过冲 1.72 且平坦区噪声最低）——见决策 #138。
+    """
+
+    NODE_NAME = "形态学清理"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "morph_clean", self.NODE_NAME, NodeCategory.SEQUENCE,
+                icon=category_icon(NodeCategory.SEQUENCE, "mdi.vector-square"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    # 选项唯一源头：options.MORPH_MODE
+                    ChoiceParam("mode", "方向", options=MORPH_MODE),
+                    IntParam("radius", "半径", default=1, minimum=1, maximum=3),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "按结构元清理亮边/暗边（色块交界处的白边、细碎亮暗点）：\n"
+                "方向：先开后闭最均衡；只开最能压掉亮边（白边）；只闭会加重亮边\n"
+                "半径：越大清理越强（1–3，默认 1）\n"
+                "输出图片序列"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        return backend.morphology_sequence(
+            cls.sequence(inputs),
+            mode=MORPH_MODE.key_of(params["mode"]),
+            radius=int(params["radius"]),
+        )
+
+
+
+
+class PixelUpscaleNode(SequenceNode):
+    """像素放大：整数倍放大每一帧（不修复伪影，只放大）。
+
+    处理：backend.pixel_upscale_sequence(factor=..., filter=...)
+    参数：factor（ChoiceParam 下拉，2×/3×/4×）、filter（ChoiceParam 下拉）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    三种滤镜都是纯空间 1:1 滤波器，走 PyAV 进程内 av.filter.Graph（零新依赖，
+    同「GIF 合成(FFmpeg)」先例）；Alpha 用最近邻整数倍块复制，不参与插值。
+    epx 只支持 2×/3×（4× 触发 libavfilter 内部溢出）——见决策 #139。
+    """
+
+    NODE_NAME = "像素放大"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "pixel_upscale", self.NODE_NAME, NodeCategory.SEQUENCE,
+                icon=category_icon(NodeCategory.SEQUENCE, "mdi.magnify-plus-outline"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    # 选项唯一源头：options.PIXEL_UPSCALE_FACTOR / PIXEL_UPSCALE_FILTER
+                    ChoiceParam("factor", "放大倍数", options=PIXEL_UPSCALE_FACTOR),
+                    ChoiceParam("filter", "放大滤镜", options=PIXEL_UPSCALE_FILTER),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "把每一帧按整数倍放大（输出尺寸 = 原尺寸 × 倍数；只放大，不修伪影）：\n"
+                "放大倍数：输出尺寸是原尺寸的几倍（2× / 3× / 4×）\n"
+                "放大滤镜：放大方式（平滑插值 / 像素风 / 最近邻精确复制，epx 只支持 2× 与 3×）\n"
+                "输出图片序列（分辨率已放大）"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        return backend.pixel_upscale_sequence(
+            cls.sequence(inputs),
+            factor=PIXEL_UPSCALE_FACTOR.value_of(params["factor"]),
+            filter=PIXEL_UPSCALE_FILTER.key_of(params["filter"]),
+        )
+
+
+
+
+class HalftoneNode(SequenceNode):
+    """半调网点：把每帧明暗转成网格网点（暗处点大、亮处点小），输出只有纯黑/纯白。
+
+    处理：backend.halftone_sequence(cell=..., shape=..., angle=...)
+    参数：cell（IntParam 滑条+数值框，2..64，默认 8）、shape（ChoiceParam 下拉）、angle（ChoiceParam 下拉）
+    组件：帧滑条（PanelSpec.scrub_frames）
+
+    输出是**二值**图（网点=黑）——二值/无抗锯齿正是丝印、阻焊开窗、铜层这类
+    「有图形 = 有该层」图稿需要的形态。点的覆盖面积按该格墨量占比求（圆/方/菱形
+    只差轮廓），故整幅黑度 ≈ 原图平均明暗；不足 1 像素的极浅点会自然消失——要避免
+    这种低于工艺极限的小点，先接「色阶」把两端吸白/吸黑。网点间距以像素计，换算
+    物理尺寸：间距(mm) = 像素 ÷ 该图 px/mm（px/mm = 图宽像素 ÷ 板宽 mm）。
+    """
+
+    NODE_NAME = "半调网点"
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "halftone", self.NODE_NAME, NodeCategory.SEQUENCE,
+                icon=category_icon(NodeCategory.SEQUENCE, "mdi.dots-hexagon"),
+                inputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                outputs=(PortDefinition("序列图片", PortType.SEQUENCE),),
+                params=(
+                    IntParam("cell", "网点间距(px)", default=8, minimum=2, maximum=64),
+                    ChoiceParam("shape", "网点形状", options=HALFTONE_SHAPE),
+                    ChoiceParam("angle", "网点角度", options=HALFTONE_ANGLE),
+                ),
+                panel=PanelSpec(scrub_frames=True),
+            ),
+            help=(
+                "输入图片序列\n"
+                "网点间距：网点格子的大小（越大点越粗、能表现的层次越少）\n"
+                "网点形状：圆点最柔和，方点/菱形更硬朗\n"
+                "网点角度：网点格子的旋转角（45° 最不容易看出行列结构）\n"
+                "输出图片序列（只有纯黑/纯白，Alpha 保留）"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        return backend.halftone_sequence(
+            cls.sequence(inputs),
+            cell=int(params["cell"]),
+            shape=HALFTONE_SHAPE.key_of(params["shape"]),
+            angle=int(HALFTONE_ANGLE.value_of(params["angle"])),
         )
 
 

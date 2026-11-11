@@ -9,6 +9,7 @@ from ..core.domain import AnalysisResult, CropSpec, MediaKind, MediaManifest, Se
 from .definitions import (
     BoolParam,
     ChoiceParam,
+    IntParam,
     NodeCategory,
     NodeDefinition,
     PanelSpec,
@@ -16,6 +17,7 @@ from .definitions import (
     PortType,
 )
 from .icon_resource import category_icon
+from .metadata_spec import ANALYSIS_META
 from .node_base import StudioNode
 from .parameter_panel import ParameterPanel
 
@@ -31,6 +33,9 @@ class PaletteViewNode(StudioNode):
     """
 
     NODE_NAME = "GIF 调色板查看"
+
+    # 分析节点：基础字段=预览文件信息，指标运行时追加（决策 #142）。
+    METADATA_SPEC = ANALYSIS_META
 
     def __init__(self):
         super().__init__(
@@ -77,6 +82,9 @@ class ResolutionViewNode(StudioNode):
     """
 
     NODE_NAME = "图片1:1分辨率查看"
+
+    # 分析节点：基础字段=预览文件信息，指标运行时追加（决策 #142）。
+    METADATA_SPEC = ANALYSIS_META
 
     def __init__(self):
         super().__init__(
@@ -148,6 +156,9 @@ class GifAnalysisNode(StudioNode):
 
     NODE_NAME = "GIF 优化分析"
 
+    # 分析节点：基础字段=预览文件信息，指标运行时追加（决策 #142）。
+    METADATA_SPEC = ANALYSIS_META
+
     def __init__(self):
         super().__init__(
             definition=NodeDefinition(
@@ -200,7 +211,12 @@ class IcoAnalysisNode(StudioNode):
     """
 
     NODE_NAME = "ICO 分辨率查看"
+
+    # 分析节点：基础字段=预览文件信息，指标运行时追加（决策 #142）。
+    METADATA_SPEC = ANALYSIS_META
+
     str_ico_center = -0.12
+
     def __init__(self):
         super().__init__(
             definition=NodeDefinition(
@@ -237,3 +253,52 @@ class IcoAnalysisNode(StudioNode):
             raise ValueError("ICO 分辨率查看：输入必须是格式化清单")
         path, metadata = backend.analysis_ico_montage(manifest)
         return AnalysisResult(path, metadata)
+
+
+class ArtifactMetricsNode(StudioNode):
+    """伪影诊断：分析类节点，度量源侧伪影（振铃白边/边缘软硬/抖动杂色），
+    可把伪影位置叠加在首采样帧上（红=亮侧过冲、蓝=孤立斑点）。
+
+    处理：backend.artifact_metrics(samples=..., heatmap=...)
+    参数：samples（IntParam 滑条+数值框，0..200，0=全部帧）、heatmap（BoolParam 勾选框）
+    组件：1:1 预览（PanelSpec.preview_1to1）
+    """
+
+    NODE_NAME = "伪影诊断"
+
+    # 分析节点：基础字段=预览文件信息，指标运行时追加（决策 #142）。
+    METADATA_SPEC = ANALYSIS_META
+
+    def __init__(self):
+        super().__init__(
+            definition=NodeDefinition(
+                "artifact_metrics", self.NODE_NAME, NodeCategory.ANALYSIS,
+                icon=category_icon(NodeCategory.ANALYSIS, "mdi.chart-line"),
+                inputs=(
+                    PortDefinition("格式化清单", PortType.MANIFEST),
+                    PortDefinition("序列图片", PortType.SEQUENCE),
+                ),
+                params=(
+                    IntParam("samples", "采样帧数", default=8, minimum=0, maximum=200),
+                    BoolParam("heatmap", "伪影热力图", default=False),
+                ),
+                panel=PanelSpec(preview_1to1=True),
+            ),
+            help=(
+                "输入图片序列/格式化清单（GIF）\n"
+                "度量源侧伪影，用来判断这一版是不是比原版好：色数、平坦区杂色、振铃白边、边缘软硬、孤立斑点\n"
+                "采样帧数：参与统计的帧数（0 = 全部帧）；伪影热力图：勾选后预览用红点标出亮侧过冲、蓝点标出孤立斑点\n"
+                "输出预览图（不产生序列；各项数值见元数据）"
+            ),
+        )
+
+    @classmethod
+    def execute(cls, inputs, params, backend):
+        manifest = next((value for value in inputs if isinstance(value, MediaManifest)), None)
+        sequence = next((value for value in inputs if isinstance(value, SequenceArtifact)), None)
+        return backend.artifact_metrics(
+            manifest,
+            sequence,
+            samples=int(params["samples"]),
+            heatmap=bool(params["heatmap"]),
+        )

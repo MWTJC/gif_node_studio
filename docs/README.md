@@ -24,7 +24,7 @@
 | [预览机制](preview.md) | 清单携带预览图、链式预览、帧滑条、1:1 查看 |
 | [规格合成语义](spec-composition.md) | 裁剪/截取链式「合成」而非「替换」 |
 | [NodeGraphQt 显示层修复](nodegraphqt-fixes.md) | `StudioNodeItem` 标题撑宽 / widget 居中 |
-| [元数据展示规则](metadata.md) | `StudioNode.describe_output`（节点自身定义，默认接管）探测与格式化 |
+| [元数据展示规则](metadata.md) | `describe_output`（节点自身定义，默认接管）探测与格式化 + `METADATA_SPEC` 空态骨架 |
 
 ### 3. 决策记录（按时间线分卷）
 
@@ -45,6 +45,7 @@
   - [决策 #111–#120](decisions/111-120.md)
   - [决策 #121–#130](decisions/121-130.md)
   - [决策 #131–#140](decisions/131-140.md)
+  - [决策 #141–#150](decisions/141-150.md)
 
 ### 4. 质量与发布
 
@@ -58,12 +59,13 @@
 
 | 页面 | 内容 |
 |---|---|
-| [节点清单](node-list.md) | 53 个节点（`NODE_CLASSES` 顺序） |
+| [节点清单](node-list.md) | 60 个节点（`NODE_CLASSES` 顺序） |
 | [运存缓存可行性评估](research/memory-cache-evaluation.md) | 中间产物磁盘缓存改运存的收益/风险/分档方案/工作量 |
 | [缓存管理增强可行性评估](research/cache-management-evaluation.md) | 缓存总大小限制 + 可调缓存路径 |
 | [PS 颜色深度对齐研究存档](research/ps-color-reduction.md) | 已回退实验；2026-08 黑盒差分结论 |
 | [gifsicle/pygifsicle 补全性调研存档](research/gifsicle-evaluation.md) | wand 四领域缺口 vs gifsicle 补全；落地为「GIF 优化」节点 |
 | [GIF 生态补全性调研存档](research/gif-ecosystem-evaluation.md) | IM/gifsicle 之外可引入的库与 CLI 全景；落地为「GIF 合成(FFmpeg)」与 WebP/APNG 导出 |
+| [源侧伪影调查与候选新节点评估存档](research/gif-source-artifacts-and-node-candidates.md) | 录屏转出 GIF 的振铃白边/软边/抖动杂色实测；12 方案复现结论；空间域算子实测与候选新节点清单 |
 
 ---
 

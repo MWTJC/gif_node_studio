@@ -45,6 +45,9 @@
 - `EXPORT_KIND` / `CACHE_FILENAME`（导出终端节点）— `ui/ui.py` 按类属性派生导出按钮
   分派与固定缓存保留，不再平行维护 kind 字符串集合/缓存文件名常量（[关键决策 #51](decisions/51-60.md#d51)）。
 - `PORT_COLORS` / `__identifier__` — 家族共享常量。
+- `METADATA_SPEC` — 输出元数据**基础字段清单**（`nodes/metadata_spec.py`，决策 #142）：
+  族基类挂默认（序列 3 项 / 清单 2 项），输出形态不一致或仅关键信息的节点覆写；
+  元数据面板空态按它渲染骨架，运行后仍由 `describe_output` 给值。
 
 > `MEDIA_KIND`（输入族）/ `CHANNEL`（颜色族）已随决策 #112 移除——execute 现在
 > 全部写在具体节点类体内，不再需要「被共享 execute 读取的每类执行常量」。
@@ -127,3 +130,27 @@
   已改为继承实现，见 [关键决策 #102](decisions/101-110.md#d102)）。
 - 类方法约束：元数据探测在工作线程进行且只持有**节点类**（`worker` 传
   `step[1]`），覆写不能依赖实例状态。
+
+<a id="metadata-spec"></a>
+
+## 基础字段声明（空态骨架，决策 #142）
+
+- **空态也说明「会显示什么」**：输出元数据面板在节点未运行时不再只显示通用
+  占位文案，而是按节点声明的**基础字段清单**渲染骨架（`帧数：—` 等）。
+- 声明位置：类属性 `METADATA_SPEC`（`nodes/metadata_spec.py` 的 `MetadataSpec`），
+  **纯常量、无 Qt、声明期禁止探测文件**（目录构建 57ms 预算）。
+- 继承默认：`SequenceNode` → `SEQUENCE_META`（帧数/尺寸/包含透明通道）；
+  `ManifestNode` → `MANIFEST_META`（媒体类型/源文件数，`extras=True`）。
+- 必须覆写的情形（共 22 个节点；其余 38 个继承族默认）：
+  - 产物与族默认不一致：`FormatNode`（清单→序列）→ `SEQUENCE_META`；
+  - 输入族直接继承 `StudioNode`：4 个输入节点 → `MANIFEST_META`、空白/渐变序列 → `SEQUENCE_META`；
+  - 多输出逐端口展开：`ChannelSplitNode`（8 项）、`SequenceRazorNode`（4 项）；
+  - 仅关键信息：非 GIF 导出终端（ICO/WebP/APNG）→ `EXPORT_FILE_META`（尺寸/文件大小）、
+    GIF 导出终端（3 个「GIF 合成」）→ `GIF_EXPORT_META`（尺寸/帧速/文件大小，实测自产物）、
+    `GifOptimizeNode`（3 项）、`PngExportNode` → `FILE_LIST_META`、5 个分析节点 → `ANALYSIS_META`。
+- `extras=True` 表示「运行后还会追加动态字段」（GIF/视频探测项、分析指标），
+  空态只列基础字段并附一行「（运行后追加详细信息）」。
+- 契约：`tests/test_metadata_spec_contract.py` 用代表性输出核对
+  `METADATA_SPEC.labels` 与 `media_info.default_describe_output` 的键一致，
+  两处漂移即测试失败。
+- 骨架只在 `output_metadata` 为空时出现；节点运行过（即使参数已脏）仍显示上次结果。

@@ -6,19 +6,30 @@ from __future__ import annotations
 
 from ..core.domain import CropSpec
 from ..core.domain import SequenceArtifact
+from ..core.options import EDGE_SMOOTH_ALGORITHM
+from ..core.options import HALFTONE_ANGLE
+from ..core.options import HALFTONE_SHAPE
+from ..core.options import MEDIAN_FILTER_ALGORITHM
+from ..core.options import MEDIAN_SIZE
+from ..core.options import MORPH_MODE
 from ..core.options import PAN_DIRECTION
 from ..core.options import PAN_INTERPOLATION
+from ..core.options import PIXEL_UPSCALE_FACTOR
+from ..core.options import PIXEL_UPSCALE_FILTER
 from ..core.options import RESAMPLE
 from ..core.options import SCALE_STRATEGY
 from ..core.options import SPEED_CURVE
 from .image_utils import PNG_CACHE_COMPRESS_LEVEL
 from .image_utils import PNG_EXPORT_WORKERS
 from .image_utils import _sample_source_indices
+from .image_utils import _save_wand_png
+from .imagemagick import require_wand
 from PIL import Image
 from PIL import ImageColor
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 from pathlib import Path
 from uuid import uuid4
 import math
@@ -219,6 +230,124 @@ def crop_sequence(workspace, progress, artifact: SequenceArtifact, crop: CropSpe
         str(output),
     )
 
+def edge_smooth_sequence(workspace, imagemagick, progress, artifact: SequenceArtifact, *, radius: int=2, algorithm: str='kuwahara'):
+    """保边平滑（序列 → 序列）：去噪的同时不糊边（源侧振铃白边/软边清理，决策 #136）。
+
+    面向「录屏转出的 GIF」：源里带振铃白边（色块交界处的过冲亮线）与编码
+    软边时，先做一次保边平滑再量化，比直接在颜色域调参有效得多（实证见
+    [源侧伪影调查](../docs/research/gif-source-artifacts-and-node-candidates.md)）。
+
+    - ``algorithm``（机器键，选项唯一源头 ``options.EDGE_SMOOTH_ALGORITHM``）：
+      - ``kuwahara``（默认）：IM ``-kuwahara``——调查里**唯一「去噪 + 边缘
+        变锐」双赢**的算子（722×720 × 39 帧：过冲 6.38 → 1.10 级、有过冲
+        边缘 50.3% → 8.3%、边缘过渡 3.0 → 2.0 px、平坦区噪声 1.22 → 0.02，
+        约 9.4 s）；
+      - ``bilateral``：IM ``-bilateral-blur``（邻域宽高 = ``radius``，颜色
+        距离影响强度/坐标距离权重由 IM 按邻域派生）。⚠️ 本类素材实测去噪
+        极弱（过冲 6.38 → 6.30）且**成倍增加唯一色数**（第 0 帧 254 → 3505
+        色 @radius 2），对下游 GIF 调色板不友好——作为备选保留，不是首选；
+    - ``radius``（1–6，默认 2）：滤波窗口半径，越大清理越强（kuwahara 3 会
+      把过冲回升到 2.24 级，实测最佳档是 2）。
+
+    Alpha 通道**逐像素原样保留**（见 ``_wand_alpha_safe_filter``）；帧数、
+    尺寸不变。
+    """
+    radius = int(radius)
+    if radius < 1:
+        raise ValueError(f"保边平滑：半径必须 ≥ 1（当前 {radius}）")
+    if algorithm not in EDGE_SMOOTH_ALGORITHM.key_set:
+        raise ValueError(
+            f"保边平滑：未知算法 {algorithm!r}（可选：{sorted(EDGE_SMOOTH_ALGORITHM.key_set)}）"
+        )
+    if algorithm == "kuwahara":
+        return _wand_alpha_safe_filter(
+            workspace, imagemagick, progress, artifact,
+            prefix="edge_smooth", operation="保边平滑",
+            apply_frame=lambda frame: frame.kuwahara(radius),
+        )
+    return _wand_alpha_safe_filter(
+        workspace, imagemagick, progress, artifact,
+        prefix="edge_smooth", operation="保边平滑",
+        apply_frame=lambda frame: frame.bilateral_blur(radius, radius),
+    )
+
+def median_filter_sequence(workspace, imagemagick, progress, artifact: SequenceArtifact, *, size: int=3, algorithm: str='median'):
+    """中值去斑（序列 → 序列）：用邻域中值替换像素，抹掉孤立杂点/抖动斑点（决策 #137）。
+
+    - ``algorithm``（``options.MEDIAN_FILTER_ALGORITHM``）：
+      - ``median``（默认）：IM ``-statistic median WxH``，窗口由 ``size`` 决定
+        ——候选算子里较稳的一档（实测 3×3：过冲 6.38 → 1.34 级、有过冲边缘
+        50.3% → 18.7%、平坦区噪声 1.22 → 0.44；5×5：1.73 / 8.8% / 0.13）；
+      - ``despeckle``：IM ``-despeckle``（自适应斑点判定，**不取窗口**）——
+        过冲压得更狠（6.38 → 0.58）但平坦区噪声回升（1.22 → 0.37）；
+    - ``size``（3/5/7，默认 3）：中值窗口边长，仅 ``median`` 生效；必须为奇数
+      （节点侧已收成 3×3 / 5×5 / 7×7 下拉，非法偶数从源头不可达）。
+
+    窗口越大越干净，但细线/小字会被一起抹平——「尽量保细节」优先选 3×3 或
+    换「保边平滑」。Alpha 原样保留；帧数、尺寸不变。
+    """
+    size = int(size)
+    allowed_sizes = tuple(option.value for option in MEDIAN_SIZE.options)
+    if size not in allowed_sizes:
+        allowed_text = "、".join(str(value) for value in allowed_sizes)
+        raise ValueError(f"中值去斑：窗口大小必须是 {allowed_text}（当前 {size}）")
+    if algorithm not in MEDIAN_FILTER_ALGORITHM.key_set:
+        raise ValueError(
+            f"中值去斑：未知算法 {algorithm!r}（可选：{sorted(MEDIAN_FILTER_ALGORITHM.key_set)}）"
+        )
+    if algorithm == "despeckle":
+        return _wand_alpha_safe_filter(
+            workspace, imagemagick, progress, artifact,
+            prefix="median_filter", operation="中值去斑",
+            apply_frame=lambda frame: frame.despeckle(),
+        )
+    return _wand_alpha_safe_filter(
+        workspace, imagemagick, progress, artifact,
+        prefix="median_filter", operation="中值去斑",
+        apply_frame=lambda frame: frame.statistic("median", size, size),
+    )
+
+def morphology_sequence(workspace, imagemagick, progress, artifact: SequenceArtifact, *, mode: str='lulu', radius: int=1):
+    """形态学清理（序列 → 序列）：按结构元对亮/暗细节做开闭运算（决策 #138）。
+
+    ⚠️ **方向必须选对**——这是本节点最容易用错的一处（下表为同源序列实测，
+    基线振铃过冲 6.38 级、平坦区噪声 1.22）：
+
+    - ``open``（先腐蚀后膨胀）：**去亮边（白边）最有效**——过冲 → ≈0 级；
+    - ``close``（先膨胀后腐蚀）：**反向加重白边**——过冲 → 8.93 级（close 把
+      亮侧过冲像素膨胀成块，GIF 上表现为白边更脏）；
+    - ``lulu``（先开后闭，默认）：两者串联——过冲 → 1.72 级且平坦区噪声最低
+      （1.22 → 0.02），最均衡的一档。
+
+    - ``mode``（机器键，``options.MORPH_MODE``）：``open`` / ``close`` / ``lulu``；
+    - ``radius``（1–3，默认 1）：结构元（Diamond）迭代次数——IM
+      ``-morphology <method> Diamond:<radius>``；越大清理越强、细节损失越多。
+
+    Alpha 原样保留；帧数、尺寸不变。
+    """
+    radius = int(radius)
+    if radius < 1:
+        raise ValueError(f"形态学清理：半径必须 ≥ 1（当前 {radius}）")
+    if mode not in MORPH_MODE.key_set:
+        raise ValueError(f"形态学清理：未知方向 {mode!r}（可选：{sorted(MORPH_MODE.key_set)}）")
+
+    def open_then_close(frame) -> None:
+        frame.morphology(method="open", kernel="Diamond", iterations=radius)
+        frame.morphology(method="close", kernel="Diamond", iterations=radius)
+
+    # wand 的 morphology method **必须小写**（"Open"/"Close" 会抛
+    # ValueError: tuple.index(x): x not in tuple，实测）。
+    appliers: dict[str, Callable[[object], None]] = {
+        "open": lambda frame: frame.morphology(method="open", kernel="Diamond", iterations=radius),
+        "close": lambda frame: frame.morphology(method="close", kernel="Diamond", iterations=radius),
+        "lulu": open_then_close,
+    }
+    return _wand_alpha_safe_filter(
+        workspace, imagemagick, progress, artifact,
+        prefix="morph_clean", operation="形态学清理",
+        apply_frame=appliers[mode],
+    )
+
 def freeze_sequence(workspace, progress, artifact: SequenceArtifact, *, end: str='first', count: int=1):
     """帧冻结（序列 → 序列）：把首帧/末帧的静态内容定格延长若干帧。
 
@@ -293,6 +422,114 @@ def gradient_sequence(workspace, progress, width: int, height: int, frames: int,
 
     paths = _parallel_pil_export(progress, frames, output, "生成渐变序列", process)
     return SequenceArtifact(paths, width, height, False, str(output))
+
+def _halftone_solid_blend(coverage, area_radius, full_radius: float, knee: float):
+    """把「单点面积口径」的点尺寸在墨量高位线性补正到铺满整格的 ``full_radius``。
+
+    点大到互相重叠后，单点面积口径会低估实际墨量（重叠部分被重复计入）；而调幅网点
+    接近实底时本就该连成一片——不补正的话 ``C = 1``（纯黑输入）会留下规律白针孔，
+    丝印/铜层这类「实底必须实底」的图稿直接受影响。``knee`` = 单点尺寸到达半格的墨量，
+    其后按线性补到满格半径（``C = 1`` 时正好铺满）。
+    """
+    blend = np.clip((coverage - knee) / (1.0 - knee), 0.0, 1.0)
+    return area_radius + (full_radius - area_radius) * blend
+
+def halftone_sequence(workspace, progress, artifact: SequenceArtifact, *, cell: int=8, shape: str='circle', angle: int=0):
+    """半调网点（序列 → 序列）：把明暗转成网点格子，输出只有纯黑/纯白。
+
+    模拟印刷/丝印的调幅网点：画面切成 ``cell`` × ``cell`` 的网点格子，每格取**格心
+    亮度** ``L``，画一个**覆盖面积 = 墨量 × 格面积**的点（墨量 ``C = 1 − L``——暗 →
+    点大、亮 → 点小、纯白 → 无点；这正是印刷网点的墨量语义）：
+
+    - ``circle``（默认）：``r = cell × √(C/π)``，格心距离 ≤ r 的像素为黑；
+    - ``square``：半边长 ``cell × √C / 2``（切比雪夫距离）；
+    - ``diamond``：``|du| + |dv| ≤ cell × √(C/2)``（曼哈顿距离）。
+
+    三种形状面积口径相同——整幅黑度 ≈ 原图平均墨量，只差轮廓；点互相重叠后单点面积
+    口径会低估墨量，故接近实底时向「铺满整格」线性补正（``_halftone_solid_blend``），
+    保证纯黑输入不留规律白针孔（方格天然密铺、无需补正）。
+
+    ``angle``（0/15/30/45/75°）只旋转网点格子（45° 是印刷黑版经典网角），不改分辨率
+    与网点间距。光栅化直接按**输出像素**做距离判定：输出即二值、无抗锯齿、不插值造
+    新色；墨量不足 1 个像素的点自然消失（要避免这种低于工艺极限的极浅小点，先接
+    「色阶」把两端吸白/吸黑）。
+
+    网点间距以**像素**计，换算物理尺寸：间距(mm) = 像素 ÷ 该图 px/mm，其中
+    ``px/mm = 图宽像素 ÷ 板宽 mm``（例：60 mm 宽出 2400 px → 40 px/mm，8 px ≈
+    0.2 mm；板厂最小可分辨细节通常 0.15–0.25 mm，据此挑间距）。
+
+    Alpha 原样保留（网点只按 RGB 亮度判定，透明像素的 RGB 照常参与）；帧数、尺寸不变。
+    """
+    cell = int(cell)
+    if not 2 <= cell <= 512:
+        raise ValueError(f"半调网点：网点间距必须是 2–512 像素（当前 {cell}）")
+    if shape not in HALFTONE_SHAPE.key_set:
+        raise ValueError(f"半调网点：未知网点形状 {shape!r}（可选：{sorted(HALFTONE_SHAPE.key_set)}）")
+    angle = int(angle)
+    allowed_angles = tuple(option.value for option in HALFTONE_ANGLE.options)
+    if angle not in allowed_angles:
+        allowed_text = "、".join(str(value) for value in allowed_angles)
+        raise ValueError(f"半调网点：网点角度必须是 {allowed_text} 度之一（当前 {angle}）")
+
+    theta = math.radians(angle)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    output = _job_dir(workspace, "halftone")
+    total = len(artifact.frames)
+    # 行分块推进：旋转坐标与距离场是逐像素临时数组，整帧一次算在 4K 素材上要几百 MB
+    # （并行导出 8 worker 更甚）；分块后临时内存与画幅无关，结果与整帧计算逐像素相同。
+    block_rows = 128
+
+    def screen_frame(index: int) -> Image.Image:
+        with Image.open(artifact.frames[index]) as image:
+            rgba = np.asarray(image.convert("RGBA"))
+            gray = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+        height, width = gray.shape
+        # 像素中心坐标（+0.5）：偶数格子的格心正好落在两像素之间，点因此左右对称。
+        xs = np.arange(width, dtype=np.float32) + 0.5 - width / 2.0
+        ink = np.empty((height, width), dtype=bool)
+        for y0 in range(0, height, block_rows):
+            y1 = min(height, y0 + block_rows)
+            ys = (np.arange(y0, y1, dtype=np.float32) + 0.5 - height / 2.0)[:, None]
+            u = xs[None, :] * cos_t + ys * sin_t
+            v = -xs[None, :] * sin_t + ys * cos_t
+            cell_u = np.floor(u / cell)
+            cell_v = np.floor(v / cell)
+            center_u = (cell_u + 0.5) * cell
+            center_v = (cell_v + 0.5) * cell
+            du = u - center_u
+            dv = v - center_v
+            # 格心旋回图像坐标取亮度（格心可能落在本块之外，照读整幅 gray）。
+            center_x = center_u * cos_t - center_v * sin_t + width / 2.0
+            center_y = center_u * sin_t + center_v * cos_t + height / 2.0
+            light = gray[
+                np.clip(np.floor(center_y).astype(np.int32), 0, height - 1),
+                np.clip(np.floor(center_x).astype(np.int32), 0, width - 1),
+            ]
+            coverage = 1.0 - light  # 墨量：暗 → 点大
+            if shape == "circle":
+                radius = _halftone_solid_blend(
+                    coverage, cell * np.sqrt(coverage / math.pi),
+                    cell * math.sqrt(0.5), math.pi / 4,
+                )
+                ink[y0:y1] = np.hypot(du, dv) <= radius
+            elif shape == "square":
+                # 方格天然密铺：边长按面积口径取，C = 1 时正好铺满整格，无需实底补正。
+                half = cell * np.sqrt(coverage) / 2.0
+                ink[y0:y1] = np.maximum(np.abs(du), np.abs(dv)) <= half
+            else:  # diamond：|du| + |dv| ≤ d
+                reach = _halftone_solid_blend(
+                    coverage, cell * np.sqrt(coverage / 2.0), cell, 0.5,
+                )
+                ink[y0:y1] = np.abs(du) + np.abs(dv) <= reach
+        ink_value = np.where(ink, np.uint8(0), np.uint8(255))
+        out = rgba.copy()
+        out[..., 0] = ink_value
+        out[..., 1] = ink_value
+        out[..., 2] = ink_value
+        return Image.fromarray(out, "RGBA")
+
+    paths = _parallel_pil_export(progress, total, output, "半调网点", screen_frame)
+    return SequenceArtifact(paths, artifact.width, artifact.height, artifact.has_alpha, str(output))
 
 def merge_alpha(workspace, progress, rgb: SequenceArtifact | None, alpha: SequenceArtifact | None):
     """A通道合并（RGB 序列 + alpha 灰度序列 → RGBA 序列，与 split_alpha 互逆）。
@@ -489,6 +726,101 @@ def pan_sequence(workspace, progress, artifact: SequenceArtifact, *, direction: 
     return SequenceArtifact(
         tuple(paths),
         artifact.width, artifact.height, artifact.has_alpha, str(output),
+    )
+
+def pixel_upscale_sequence(workspace, progress, artifact: SequenceArtifact, *, factor: int=2, filter: str='xbr'):
+    """像素放大（序列 → 序列）：整数倍放大每一帧（**不修复伪影，只放大**，决策 #139）。
+
+    与「百分比缩放（最近邻）」「分辨率统一」部分重叠：本节点保证**整数倍**
+    （像素网格对齐、无半像素偏移），并额外提供 xbr/epx 边缘插值放大。
+
+    - ``factor``（2/3/4）：输出尺寸 = 原尺寸 × factor——``SequenceArtifact``
+      的 ``width``/``height`` 随之更新，下游「颜色量化 / GIF 合成」不受影响，
+      但「分辨率统一」的基准会变（预期行为）；
+    - ``filter``（``options.PIXEL_UPSCALE_FILTER``，键 = libavfilter 滤镜名）：
+      - ``xbr``（默认）：高精度边缘插值（线条/色块交界更平滑），支持 2×/3×/4×；
+      - ``epx``：像素风放大，**libavfilter 只支持 2×/3×**（4× 触发内部
+        ``OverflowError``，此处前置拦成中文报错）；
+      - ``nearest``：``scale=flags=neighbor`` 整数倍最近邻——像素**精确复制**
+        不产生任何新色，像素画/线稿首选（对 GIF 调色板最友好）。
+
+    实现（零新依赖，同「GIF 合成(FFmpeg)」先例）：PyAV 进程内
+    ``av.filter.Graph``——``buffer(rgb24)`` → 滤镜 → ``format=rgb24``（xbr/epx
+    输出 bgr0/argb，必须显式转回）→ ``buffersink``；三种滤镜都是**纯空间
+    1:1 滤波器**，因此逐帧「推一帧、拉一帧」（实测与「推全再拉全」逐像素
+    等价，内存不随帧数增长）。
+
+    Alpha 通道不参与插值：另用 PIL 最近邻按整数倍**块复制**（几何精确、
+    不发明半透明值），再与滤镜输出的 RGB 合成 RGBA——GIF 的 1-bit 透明语义
+    下与插值 alpha 观感一致，且不引入多余的中间 alpha 值。
+    """
+    factor = int(factor)
+    allowed_factors = tuple(option.value for option in PIXEL_UPSCALE_FACTOR.options)
+    if factor not in allowed_factors:
+        allowed_text = "/".join(str(value) for value in allowed_factors)
+        raise ValueError(f"像素放大：放大倍数必须是 {allowed_text}（当前 {factor}）")
+    if filter not in PIXEL_UPSCALE_FILTER.key_set:
+        raise ValueError(
+            f"像素放大：未知放大滤镜 {filter!r}（可选：{sorted(PIXEL_UPSCALE_FILTER.key_set)}）"
+        )
+    if filter == "epx" and factor not in (2, 3):
+        raise ValueError(
+            f"像素放大：epx 滤镜只支持 2×/3×（当前 {factor}×，libavfilter 会在 4× 时溢出），"
+            "请改用 xbr 或最近邻"
+        )
+    if not artifact.frames:
+        raise ValueError("像素放大：输入序列为空")
+    import av
+
+    target_w, target_h = artifact.width * factor, artifact.height * factor
+    output = _job_dir(workspace, "pixel_upscale")
+    total = len(artifact.frames)
+
+    # 建一次滤镜图，逐帧推拉（time_base 仅为满足 add_buffer 契约，本路径不涉及时长）。
+    graph = av.filter.Graph()
+    source = graph.add_buffer(
+        width=artifact.width, height=artifact.height,
+        format="rgb24", time_base=Fraction(1, 30),
+    )
+    if filter == "nearest":
+        node = graph.add("scale", f"w={target_w}:h={target_h}:flags=neighbor")
+    else:
+        node = graph.add(filter, f"n={factor}")
+    source.link_to(node)
+    previous = node
+    if filter != "nearest":
+        # xbr → bgr0、epx → argb：显式转回 rgb24（多数滤镜不接受 rgb24 直通，
+        # 但三者都接受 rgb24 输入，见 docs/research 与技能 ref 的实测记录）。
+        converter = graph.add("format", "pix_fmts=rgb24")
+        previous.link_to(converter)
+        previous = converter
+    sink = graph.add("buffersink")
+    previous.link_to(sink)
+    graph.configure()
+
+    paths: list[str] = []
+    for index, source_path in enumerate(artifact.frames):
+        # 立即复制一份像素，脱离 PIL 缓冲（with 结束后底层 buffer 可能释放）。
+        with Image.open(source_path) as image:
+            rgba = np.array(image.convert("RGBA"))
+        rgb = np.ascontiguousarray(rgba[..., :3])
+        frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+        frame.pts = index
+        graph.vpush(frame)
+        upscaled = graph.vpull()  # 纯空间 1:1 滤波：推一帧恰得一阵
+        result_rgb = Image.fromarray(upscaled.to_ndarray(format="rgb24").copy(), "RGB")
+        # Alpha：整数倍最近邻 = 每个像素精确复制成 factor×factor 块。
+        alpha = Image.fromarray(rgba[..., 3], "L").resize(
+            (target_w, target_h), Image.Resampling.NEAREST
+        )
+        merged = Image.merge("RGBA", (*result_rgb.split(), alpha))
+        target = output / f"frame_{index:06d}.png"
+        merged.save(target, "PNG", compress_level=PNG_CACHE_COMPRESS_LEVEL)
+        paths.append(str(target))
+        _progress(progress, (index + 1) / total, "像素放大")
+    graph.vpush(None)
+    return SequenceArtifact(
+        tuple(paths), target_w, target_h, artifact.has_alpha, str(output),
     )
 
 def rewind_sequence(workspace, progress, artifact: SequenceArtifact):
@@ -850,6 +1182,55 @@ def _progress(progress: ProgressReporter | None, fraction: float | None, label: 
     """模块版（决策 #120）：等价原 ``MediaBackend._progress``。"""
     if progress is not None:
         progress(fraction, label)
+
+def _wand_alpha_safe_filter(
+    workspace: Path,
+    imagemagick,
+    progress: ProgressReporter | None,
+    artifact: SequenceArtifact,
+    *,
+    prefix: str,
+    operation: str,
+    apply_frame: Callable[[object], None],
+) -> SequenceArtifact:
+    """逐帧 Wand 空间滤波骨架（Alpha 摘出 → 处理 → 回填 → 导出 PNG）。
+
+    空间算子（kuwahara / statistic / despeckle / morphology / bilateral）都会
+    **连带滤波 Alpha 通道**（2026-09 实测：孤立半透明像素 60 → 174/255/56，
+    即 alpha 也会被邻域运算改写）。因此统一按 ``color_quantize_sequence`` 的
+    掩码配方处理：把 Alpha 摘出为**灰度掩码**、关掉帧的 alpha 通道，算子跑完
+    再用 ``composite(operator="copy_alpha")`` 回填——实测回填后 Alpha 与原帧
+    **逐像素完全相同**，而 RGB 恰为算子结果（该配方即测试里的回归护栏）。
+
+    逐帧顺序处理、顺序导出（``_save_wand_png``）：滤镜本身就是耗时大头
+    （722×720 × 39 帧约 9–11 s），并行导出收益不足 5%，不值得多一份整段内存。
+    """
+    require_wand(imagemagick, operation)
+    if not artifact.frames:
+        raise ValueError(f"{operation}：输入序列为空")
+    from wand.image import Image as WandImage
+
+    output = _job_dir(workspace, prefix)
+    total = len(artifact.frames)
+    paths: list[str] = []
+    for index, source in enumerate(artifact.frames):
+        with WandImage(filename=source) as frame:
+            alpha_mask = None
+            if frame.alpha_channel:
+                alpha_mask = frame.clone()
+                alpha_mask.alpha_channel = "extract"
+                frame.alpha_channel = "off"
+            apply_frame(frame)
+            if alpha_mask is not None:
+                frame.composite(alpha_mask, operator="copy_alpha")
+                alpha_mask.close()
+            target = output / f"frame_{index:06d}.png"
+            _save_wand_png(frame, target)
+            paths.append(str(target))
+        _progress(progress, (index + 1) / total, operation)
+    return SequenceArtifact(
+        tuple(paths), artifact.width, artifact.height, artifact.has_alpha, str(output),
+    )
 
 def _scale_to_canvas(
     image: Image.Image,

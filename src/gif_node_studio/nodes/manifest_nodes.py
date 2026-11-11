@@ -18,11 +18,15 @@ from .definitions import (
     PortType,
 )
 from .icon_resource import category_icon
+from .metadata_spec import MANIFEST_META, SEQUENCE_META
 from .node_base import StudioNode
 from .parameter_panel import ParameterPanel
 
 class ManifestNode(StudioNode):
-    """清单族基类：只拥有共享的输入校验。"""
+    """清单族基类：只拥有共享的输入校验与输出元数据基础字段声明。"""
+
+    # 清单元数据基础字段恒为「媒体类型 / 源文件数」，探测项运行时追加（决策 #142）。
+    METADATA_SPEC = MANIFEST_META
 
     @classmethod
     def manifest(cls, inputs: list[Any]) -> MediaManifest:
@@ -169,6 +173,9 @@ class FormatNode(ManifestNode):
     """
 
     NODE_NAME = "格式化"
+
+    # 清单 → 序列：产物是 SequenceArtifact，族默认（清单元数据）不适用（决策 #142）。
+    METADATA_SPEC = SEQUENCE_META
 
     def __init__(self):
         super().__init__(

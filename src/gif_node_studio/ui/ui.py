@@ -43,9 +43,11 @@ from ..nodes.backdrop import (
 )
 from ..nodes.definitions import NodeCategory, PortType
 from ..nodes.node_base import StudioNode
+from ..nodes.preview_clock import render_clock
 from ..nodes.registry import NODE_CLASSES, node_class_by_kind, node_definitions, node_help_by_kind
 from ..runner.async_worker import AsyncExecutionWorker, TimedResult
 from .actions import ACTIONS, GRAPH_MENU, MENUBAR, NODE_MENU, PRESETS_SUBMENU, SEP, TOOLBAR
+from .fps_meter import FpsMeter, note_viewport_paint
 from .session import SessionLoadReport, sanitize_session_data, save_session_clean
 from .settings_manager import SettingsDialog, SettingsManager, apply_grid_mode, apply_pipe_style
 from .theme import apply_graph_theme, recolor_all_pipes
@@ -175,17 +177,45 @@ def _ancestors(node):
 
 
 
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"})
+
+
+def _frame_path_list(result) -> list[str] | None:
+    """把「帧文件列表」形态的结果归一为路径列表；否则返回 ``None``。
+
+    只为「产物是帧文件目录」的导出节点服务（``png_export``：``backend.export_pngs``
+    返回写入的文件元组，决策 #144）：同一份列表既用来显示首帧、也用来填帧滑条。
+    判定刻意从严——元素必须全是 ``str``/``PathLike`` 且后缀是图片格式；其它元组/
+    列表结果（元数据、路径列表之外的东西）一律 ``None``，保持原来的「清空滑条」
+    行为，避免「串台」回归（见 ``_feed_sequence_frames`` 的历史说明）。
+    """
+    if not isinstance(result, (list, tuple)) or not result:
+        return None
+    paths: list[str] = []
+    for item in result:
+        if not isinstance(item, (str, os.PathLike)):
+            return None
+        if Path(item).suffix.lower() not in _IMAGE_SUFFIXES:
+            return None
+        paths.append(str(item))
+    return paths
+
+
 def _feed_sequence_frames(panel, result) -> None:
     """把可逐帧查看的帧路径喂给面板滑条。
 
     - ``SequenceArtifact`` → 全部帧；
     - ``AnalysisResult`` 携带 ``frames``（图片1:1分辨率查看的序列输入）→ 全部帧；
     - ``MultiOutput``（RGBA 通道分离）→ 首个通道的帧（红通道）；
+    - **帧文件列表**（``png_export`` 的文件元组，见 ``_frame_path_list``）→ 全部帧；
     - 其余结果（1:1 查看节点的 GIF/视频清单项等）→ **清空滑条帧状态**，
       否则旧序列帧残留导致「串台」：先预览序列、再浏览清单项时，
       拖动滑条会混入上一轮的帧（历史回归点，见 docs/testing.md「历史验证清单」）。
     """
-    if isinstance(result, SequenceArtifact):
+    frame_paths = _frame_path_list(result)
+    if frame_paths is not None:
+        panel.set_sequence_frames(frame_paths)
+    elif isinstance(result, SequenceArtifact):
         panel.set_sequence_frames(result.frames)
     elif isinstance(result, AnalysisResult) and result.frames:
         panel.set_sequence_frames(list(result.frames))
@@ -294,6 +324,22 @@ class MainWindow(QtWidgets.QMainWindow):
         _pump_startup_events()
         self.statusBar().addPermanentWidget(self._unstable_warning)  # 此步耗时较长
         _pump_startup_events()
+        # 预览刷新读数（决策 #146/#147）：常驻状态栏最左，每秒刷新一次。
+        # 口径 = **画布刷新率**（视口 Paint 次数，游戏式 FPS）：Qt 只合并同一轮
+        # 事件循环内的 update()，所以必须配合统一帧钟，读数才等于设定值、与
+        # 预览个数无关（实测 8 个预览：各自定时器 57.5 次/秒 → 统一帧钟 30.5）。
+        self._playback_paused = False
+        self._fps_label = QtWidgets.QLabel("渲染 0 fps")
+        self._fps_label.setStyleSheet("color:#9aa3af;")
+        # 定宽（等宽数字位）：避免每秒数字变化让状态栏反复重排。
+        self._fps_label.setMinimumWidth(
+            self._fps_label.fontMetrics().horizontalAdvance("渲染 999 fps（已暂停）")
+        )
+        self._fps_label.setToolTip("画布每秒刷新次数（界面合成；鼠标悬停查看预览框绘制与换帧明细）")
+        self.statusBar().insertPermanentWidget(0, self._fps_label)
+        self._fps_meter = FpsMeter(self)
+        self._fps_meter.updated.connect(self._on_fps_tick)
+        self._fps_meter.start()
         self.unstable_detected.connect(self._on_unstable_detected)
         add_faulthandler_observer(self.unstable_detected.emit)
         # GUI 心跳：5 秒一次；faulthandler 转储时据此判断主线程是否已卡死
@@ -369,6 +415,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.graph.register_node(EditableBackdropNode, alias="Backdrop")
         self.graph.register_nodes(NODE_CLASSES)
         self.setCentralWidget(self.graph.widget)
+        # 画布刷新计数（决策 #147）：状态栏「渲染 fps」的主口径 = 视口 Paint 次数。
+        # 用事件过滤器而非子类化 viewport（NodeGraphQt 持有该控件）。
+        self._viewport = self.graph.viewer().viewport()
+        self._viewport.installEventFilter(self)
         self.help = HelpWidget()
         help_dock = QtWidgets.QDockWidget("用法说明/元数据", self)
         help_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
@@ -469,6 +519,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph.undo_stack().indexChanged.disconnect(self._update_undo_redo_actions)
         except (RuntimeError, TypeError):
             pass
+        # 收尾：停统一帧钟与状态栏读数（决策 #147），避免定时器在销毁期出拍。
+        self._fps_meter.stop()
+        render_clock().stop()
         super().closeEvent(event)
 
     def changeEvent(self, event):
@@ -490,8 +543,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return super().event(event)
 
     def eventFilter(self, obj, event):
-        """全局空格键绑定：切换「自动」开关。焦点在数值/文本输入组件时放行给输入框
-        （避免打断键入）；菜单/下拉等弹出层或模态对话框打开时同样放行。"""
+        """全局事件过滤：①状态栏读数的画布刷新计数；②全局空格键「自动」开关。
+
+        ① ``_viewport`` 的 Paint 事件 = 界面每秒合成次数（决策 #147 状态栏主口径），
+        只做一次整数自增，必须在事件处理最前面（后面有按键逻辑）。
+        ② 空格键：焦点在数值/文本输入组件时放行给输入框（避免打断键入）；
+        菜单/下拉等弹出层或模态对话框打开时同样放行。
+        """
+        if event.type() == QtCore.QEvent.Type.Paint and obj is getattr(self, "_viewport", None):
+            note_viewport_paint()
+            return False
         if event.type() == QtCore.QEvent.Type.ShortcutOverride:
             # 全局快捷键（右键菜单动作：Ctrl+C/X/V、Ctrl+A、D/F/L/H 等）在
             # 文本/数值输入组件聚焦时被拦截：接受 override 让按键落到输入框，
@@ -983,6 +1044,8 @@ class MainWindow(QtWidgets.QMainWindow):
         node.panel.set_preview_bg_color(self._alpha_bg_color())
         # 注入设置管理器：文件选择行（FilePathWidget）读/写「上次导入目录」记忆。
         node.panel.settings = self.settings
+        # 注入预览出帧上限（决策 #146；关闭时为 None = 不限）。
+        node.panel.set_preview_fps_limit(self.settings.preview_fps_cap())
 
 
     def _on_selected(self, node):
@@ -1196,6 +1259,8 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.reset_requested.connect(self._apply_view_settings)
         # 透明背景色变更 → 应用到所有 1:1 查看节点面板（刷新预览框背景）。
         dialog.alpha_bg_changed.connect(self._apply_alpha_bg_color)
+        # 预览出帧上限变更 → 即时下发到所有面板（决策 #146）。
+        dialog.preview_fps_changed.connect(lambda _cap: self._apply_preview_fps_limit())
         dialog.exec()
         # 自动保存间隔可能在对话框内被修改/重置：按新设置重启定时器。
         self._apply_autosave_settings()
@@ -1403,6 +1468,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_playback_paused(self, paused: bool, *, freeze_view: bool = False) -> None:
         """暂停/恢复所有节点的预览动画播放；freeze_view 时同时冻结/解冻画布重绘。"""
+        self._playback_paused = bool(paused)  # 状态栏读数据此标注「已暂停」
         for node in self.graph.all_nodes():
             if not isinstance(node, StudioNode):
                 continue
@@ -1428,6 +1494,32 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         self._unstable_warning.show()
         self.statusBar().showMessage("检测到软件不稳定，请立即保存节点方案！")
+
+    # --- 预览刷新读数（状态栏，决策 #146） ---
+
+    def _on_fps_tick(self, viewport: int, paints: int, frames: int) -> None:
+        """每秒一次：状态栏显示「渲染 fps」= 画布刷新次数（游戏式口径）。
+
+        预览框绘制/换帧只进 tooltip：三者关系 = 渲染次数 × 每拍合并的预览数。
+        例如限帧 30、3 个预览在播时典型读数「渲染 30 / 预览框绘制 90 / 换帧 90」。
+        """
+        suffix = "（已暂停）" if self._playback_paused else ""
+        self._fps_label.setText(f"渲染 {viewport} fps{suffix}")
+        self._fps_label.setToolTip(
+            f"画布刷新 {viewport} 次/秒（界面合成次数）\n"
+            f"预览框绘制 {paints} 次/秒；播放换帧 {frames} 次/秒"
+        )
+
+    def _apply_preview_fps_limit(self) -> None:
+        """把设置里的预览出帧上限下发到所有节点面板（决策 #146，即时生效）。"""
+        cap = self.settings.preview_fps_cap()
+        for node in self.graph.all_nodes():
+            if not isinstance(node, StudioNode):
+                continue
+            try:
+                node.panel.set_preview_fps_limit(cap)
+            except RuntimeError:
+                continue
 
     # --- 执行进度（左侧节点库底部共用进度条） ---
 
@@ -1694,7 +1786,9 @@ class MainWindow(QtWidgets.QMainWindow):
             else describe_output(result, current)
         )
         current.dirty = False
-        if getattr(type(current), "EXPORT_KIND", None) == "gif":
+        # 产物自身可播放的导出节点（GIF / GIF 优化 / WebP / APNG）由节点声明
+        # PREVIEW_PRODUCT，预览框播放**真实产物**而不是上游首帧（决策 #144）。
+        if getattr(type(current), "PREVIEW_PRODUCT", False):
             current.preview_output = self.preview_export_path(current)
         current.set_status("clean")
         current.panel.show_preview(self.preview_path_for_node(current))
@@ -1865,6 +1959,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 return Path(output.sources[0])
             if output.preview: return Path(output.preview)
             if output.sources: return Path(output.sources[0])
+        paths = _frame_path_list(output)
+        if paths is not None:
+            # 帧文件列表形态的结果（PNG 导出产物）：预览取首个存在的帧。
+            for candidate in paths:
+                if Path(candidate).exists():
+                    return Path(candidate)
+            return None
         if isinstance(output, Path) and output.suffix.lower() == ".gif" and output.exists(): return output
         return None
 

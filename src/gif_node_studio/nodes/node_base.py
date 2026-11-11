@@ -18,7 +18,9 @@ from ..media.backend import MediaBackend
 from ..media.media_info import default_describe_output
 from .definitions import NodeDefinition, PortType
 from .icon_resource import category_color
+from .metadata_spec import MetadataSpec
 from .parameter_panel import ParameterPanel
+from .status_badge import StatusBadge
 
 # ---------------------------------------------------------------------------
 # 标题栏外观开关（开发对比用，节点创建时读取，改动后重启生效）
@@ -26,6 +28,11 @@ from .parameter_panel import ParameterPanel
 # 分类色条（节点左缘强调竖条）总开关：False = 完全隐藏竖条效果，标题/图标
 # 的左偏移随之紧凑（_TITLE_LEFT 与 _align_icon_horizontal 同源判断）。
 CATEGORY_COLOR_BAR_ENABLED = True
+
+# 端口整体下移量：让开右上角状态角标（角标圆心压在节点右上角，下半圆到
+# y = BADGE_D/2 ≈ 30）。库默认端口从标题栏下缘（y≈27）开始排，与角标重叠；
+# 只移端口、不动参数面板，节点高度与面板布局不变。
+PORT_TOP_PAD = 14.0
 
 # 节点体圆角半径 / 内边距：与 NodeGraphQt ``NodeItem._paint_horizontal`` 的
 # ``radius=4.0`` / ``margin=1.0`` 保持一致——色条路径按同一圆角裁剪，
@@ -118,6 +125,36 @@ class StudioNodeItem(NodeItem):
         """节点重排后同步色条路径（尺寸变化/圆角跟随节点体）。"""
         super().draw_node()
         self._sync_color_bar()
+        self._sync_status_badge()
+
+    def set_status(self, state: str, detail: str = "") -> None:
+        """节点状态角标（右上角圆标识，见 status_badge.py）。
+
+        角标是子项而非 ``paint()`` 内绘制（本库版本里 ``paint()`` 中
+        ``super()`` 之后的绘制不生效）。首次调用时惰性创建。
+        """
+        self._status_state = (state, detail)
+        badge = getattr(self, "_status_badge", None)
+        if badge is None:
+            badge = StatusBadge(self)
+            self._status_badge = badge
+        badge.set_state(state, detail)
+        self._sync_status_badge()
+
+    def _sync_status_badge(self) -> None:
+        """跟随节点体尺寸把角标钉到右上角（节点变宽/变高后调用）。"""
+        badge = getattr(self, "_status_badge", None)
+        if badge is not None:
+            badge.sync_position()
+
+    def _align_ports_horizontal(self, v_offset):
+        """端口整体下移 ``PORT_TOP_PAD``：给右上角状态角标让位。
+
+        库的 ``_draw_node_horizontal`` 用 ``align_ports(v_offset=标题高度+4)``
+        排端口，输入/输出都从这一行起依次往下叠；这里只把基准下移，不改
+        面板（``align_widgets``）的偏移，所以参数区布局与节点高度都不变。
+        """
+        super()._align_ports_horizontal(v_offset + PORT_TOP_PAD)
 
     def _sync_color_bar(self) -> None:
         """创建/更新分类色条子项：路径 = 节点体圆角矩形 ∩ 左缘竖条。
@@ -301,6 +338,10 @@ class StudioNode(BaseNode, ABC):
         PortType.MANIFEST: parse_hex(PORT_ANCHORS["manifest"]),
         PortType.SEQUENCE: parse_hex(PORT_ANCHORS["sequence"]),
     }
+    # 输出元数据「基础字段清单」声明（决策 #142）：输出元数据面板空态骨架的
+    # 唯一源头。默认空声明 → 回落通用占位文案；族基类按输出值类型挂默认，
+    # 输出形态不一致或仅关键信息的节点覆写本类属性（不改 describe_output 行为）。
+    METADATA_SPEC: ClassVar[MetadataSpec] = MetadataSpec()
 
     def __init__(self, definition: NodeDefinition, *, help: str = ""):
         super().__init__(qgraphics_item=StudioNodeItem)
@@ -404,3 +445,4 @@ class StudioNode(BaseNode, ABC):
 
     def set_status(self, state: str, detail: str = "") -> None:
         self.panel.set_status(state, detail)
+        self.view.set_status(state, detail)
